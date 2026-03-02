@@ -28,12 +28,7 @@ class LLMSettings(BaseSettings):
     fallback_llm_api_key: str = ""
     fallback_llm_base_url: str = "https://api.openai.com/v1"
     fallback_llm_model: str = "gpt-4o-mini"
-    print(llm_api_key)
-    print(llm_base_url)
-    print("llm_model:", llm_model)
-    print(fallback_llm_api_key)
-    print(fallback_llm_base_url)
-    print(fallback_llm_model)
+
 
 
 class EmbeddingSettings(BaseSettings):
