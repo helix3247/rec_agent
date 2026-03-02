@@ -39,6 +39,8 @@ env/
 !.env.example
 
 # Logs
+logs/
+!logs/.gitkeep
 *.log
 
 # Data (Exclude large mock data or local DB files)
