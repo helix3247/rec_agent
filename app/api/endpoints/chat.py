@@ -1,6 +1,7 @@
 """
 app/api/endpoints/chat.py
 POST /chat 接口 —— 接收用户查询，异步调用 Graph，返回结构化响应。
+支持多轮对话：从 Redis 加载历史消息注入 State。
 """
 
 import uuid
@@ -11,6 +12,7 @@ from langchain_core.messages import HumanMessage
 
 from app.models.schemas import ChatRequest, ChatResponse, CandidateItem
 from app.graph import app_graph
+from app.agents.dialog import load_history, load_slots
 from app.core.logger import get_logger
 
 router = APIRouter()
@@ -25,13 +27,23 @@ async def chat(request: ChatRequest):
 
     log.info("收到请求 | query={} | thread_id={}", request.query, thread_id)
 
+    # 从 Redis 加载已有的对话历史和槽位
+    history = load_history(thread_id)
+    stored_slots = load_slots(thread_id)
+
+    if history:
+        log.info("加载历史对话 | history_count={}", len(history))
+
+    messages = history + [HumanMessage(content=request.query)]
+
     initial_state = {
-        "messages": [HumanMessage(content=request.query)],
+        "messages": messages,
         "trace_id": trace_id,
         "thread_id": thread_id,
         "user_id": request.user_id or "",
         "selected_product_id": request.selected_product_id or "",
         "task_status": "pending",
+        "slots": stored_slots,
     }
 
     result = await app_graph.ainvoke(initial_state)

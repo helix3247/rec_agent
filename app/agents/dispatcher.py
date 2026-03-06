@@ -1,19 +1,31 @@
 """
 app/agents/dispatcher.py
-TaskDispatcherAgent — Mock 版本。
-根据 user_intent 路由到下一个 Agent 节点。
+TaskDispatcherAgent —— 根据意图和槽位状态进行动态路由。
+支持缺槽位时先转 DialogFlowAgent 追问。
 """
 
 from app.state import AgentState
 from app.core.logger import get_logger
 
 
+_SLOT_REQUIREMENTS = {
+    "search": ["category", "budget"],
+    "outfit": ["scenario"],
+}
+
+
 def dispatcher_node(state: AgentState) -> dict:
-    """Mock: 记录路由决策，实际路由由条件边完成。"""
+    """Dispatcher 节点：记录路由决策日志。实际路由由条件边 dispatch_route 完成。"""
     trace_id = state.get("trace_id", "-")
     intent = state.get("user_intent", "unknown")
+    slots = state.get("slots", {})
     log = get_logger(agent_name="Dispatcher", trace_id=trace_id)
-    log.info("调度开始 | intent={}", intent)
+
+    missing = _find_missing_slots(intent, slots)
+    if missing:
+        log.info("调度决策: 槽位缺失，转 DialogFlow 追问 | intent={} | missing={}", intent, missing)
+    else:
+        log.info("调度决策: 槽位完整，转专家 Agent | intent={}", intent)
 
     return {
         "current_agent": "Dispatcher",
@@ -22,16 +34,39 @@ def dispatcher_node(state: AgentState) -> dict:
 
 
 def dispatch_route(state: AgentState) -> str:
-    """条件边路由函数：根据 user_intent 决定下一个节点。"""
+    """
+    条件边路由函数：根据 user_intent 和槽位完整性决定下一个节点。
+
+    路由规则:
+        - search/outfit 且关键槽位缺失 -> dialog（追问）
+        - search/compare -> shopping
+        - outfit -> shopping（阶段三仍由 ShoppingAgent 兜底，阶段四换 OutfitAgent）
+        - qa -> shopping（阶段三仍由 Mock ShoppingAgent 兜底，阶段四换 RAGAgent）
+        - chat/unknown -> dialog
+        - plan -> shopping（阶段三仍由 Mock 兜底，阶段五换 PlannerNode）
+        - tool -> shopping（阶段四换 ToolCallAgent）
+    """
     intent = state.get("user_intent", "unknown")
+    slots = state.get("slots", {})
+
+    if intent in ("search", "outfit"):
+        missing = _find_missing_slots(intent, slots)
+        if missing:
+            return "dialog"
 
     route_map = {
         "search": "shopping",
         "outfit": "shopping",
         "qa": "shopping",
-        "chat": "shopping",
         "compare": "shopping",
         "plan": "shopping",
-        "unknown": "shopping",
+        "chat": "dialog",
+        "unknown": "dialog",
     }
-    return route_map.get(intent, "shopping")
+    return route_map.get(intent, "dialog")
+
+
+def _find_missing_slots(intent: str, slots: dict) -> list[str]:
+    """检查给定意图所需的关键槽位是否缺失。"""
+    required = _SLOT_REQUIREMENTS.get(intent, [])
+    return [s for s in required if not slots.get(s)]
