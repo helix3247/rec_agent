@@ -1,7 +1,7 @@
 """
 tests/test_routing.py
 验证不同意图输入通过 Dispatcher 的路由路径是否正确。
-使用真实 LLM 识别意图，然后检查最终走了哪条路径。
+使用真实 LLM 识别意图，利用 dispatch_route 函数直接验证路由目标。
 """
 
 import sys
@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from langchain_core.messages import HumanMessage
 from app.graph import app_graph
+from app.agents.dispatcher import dispatch_route
 
 
 ROUTE_CASES = [
@@ -22,7 +23,7 @@ ROUTE_CASES = [
     {
         "query": "男生休闲穿搭推荐，预算500",
         "expected_intent": "outfit",
-        "expected_route": "shopping",
+        "expected_route": "outfit",
     },
     {
         "query": "想买个相机",
@@ -37,29 +38,19 @@ ROUTE_CASES = [
     {
         "query": "Sony A7M4 的续航表现怎么样",
         "expected_intent": "qa",
-        "expected_route": "shopping",
+        "expected_route": "rag",
     },
     {
         "query": "iPhone 16 和 Samsung S25 哪个好",
         "expected_intent": "compare",
         "expected_route": "shopping",
     },
+    {
+        "query": "去西藏旅游需要准备哪些装备",
+        "expected_intent": "plan",
+        "expected_route": "planner",
+    },
 ]
-
-
-def determine_route(result: dict) -> str:
-    """根据结果的 current_agent 链路判断实际走了 shopping 还是 dialog 路径。"""
-    response = result.get("response", "")
-    task_status = result.get("task_status", "")
-    candidates = result.get("candidates", [])
-
-    if "Mock" in response and candidates:
-        return "shopping"
-    if task_status == "clarifying":
-        return "dialog"
-    if not candidates:
-        return "dialog"
-    return "shopping"
 
 
 def main():
@@ -82,7 +73,10 @@ def main():
         })
 
         actual_intent = result.get("user_intent", "")
-        actual_route = determine_route(result)
+        actual_route = dispatch_route({
+            "user_intent": actual_intent,
+            "slots": result.get("slots", {}),
+        })
 
         intent_ok = actual_intent == expected_intent
         route_ok = actual_route == expected_route

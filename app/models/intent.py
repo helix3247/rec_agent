@@ -11,10 +11,10 @@ from pydantic import BaseModel, Field
 class IntentResult(BaseModel):
     """LLM 意图识别的结构化输出。"""
 
-    intent: Literal["search", "outfit", "qa", "chat", "compare", "plan"] = Field(
+    intent: Literal["search", "outfit", "qa", "chat", "compare", "plan", "tool"] = Field(
         ...,
         description="用户意图分类: search(商品搜索), outfit(穿搭推荐), qa(商品问答), "
-                    "chat(闲聊), compare(商品对比), plan(复杂任务规划)",
+                    "chat(闲聊), compare(商品对比), plan(复杂任务规划), tool(工具调用/查询订单物流等)",
     )
     budget: Optional[str] = Field(
         None,

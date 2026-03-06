@@ -11,8 +11,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.core.llm import get_llm
-from app.agents.intent_parser import _parse_intent_json
+from app.agents.intent_parser import _invoke_structured
+from app.models.intent import IntentResult
 from app.prompts.intent import INTENT_SYSTEM_PROMPT
+from app.core.logger import get_logger
+
+_log = get_logger(agent_name="TestIntent", trace_id="test-intent")
 
 
 TEST_CASES = [
@@ -87,11 +91,11 @@ def run_intent_test():
         check_slots = case["check_slots"]
 
         try:
-            response = llm.invoke([
+            prompt_messages = [
                 SystemMessage(content=INTENT_SYSTEM_PROMPT),
                 HumanMessage(content=query),
-            ])
-            result = _parse_intent_json(response.content)
+            ]
+            result = _invoke_structured(llm, prompt_messages, _log)
 
             intent_ok = result.intent == expected
 

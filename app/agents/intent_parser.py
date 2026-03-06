@@ -1,7 +1,8 @@
 """
 app/agents/intent_parser.py
 IntentParserAgent —— 接入 LLM 进行意图识别和槽位抽取。
-通过 Prompt 要求 JSON 输出 + 手动解析，兼容 DeepSeek / OpenAI。
+使用 llm.with_structured_output(IntentResult) 实现结构化输出，
+并保留手动 JSON 解析作为 fallback 兼容方案。
 """
 
 import json
@@ -14,11 +15,11 @@ from app.core.logger import get_logger
 from app.models.intent import IntentResult
 from app.prompts.intent import INTENT_SYSTEM_PROMPT
 
-_VALID_INTENTS = {"search", "outfit", "qa", "chat", "compare", "plan"}
+_VALID_INTENTS = {"search", "outfit", "qa", "chat", "compare", "plan", "tool"}
 
 
 def _parse_intent_json(text: str) -> IntentResult:
-    """从 LLM 返回的文本中提取 JSON 并解析为 IntentResult。"""
+    """从 LLM 返回的文本中手动提取 JSON，作为 with_structured_output 的 fallback。"""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
@@ -30,6 +31,20 @@ def _parse_intent_json(text: str) -> IntentResult:
     return IntentResult(**data)
 
 
+def _invoke_structured(llm, messages, log) -> IntentResult:
+    """优先使用 with_structured_output，失败则回退手动 JSON 解析。"""
+    try:
+        structured_llm = llm.with_structured_output(IntentResult)
+        result = structured_llm.invoke(messages)
+        if result.intent not in _VALID_INTENTS:
+            result.intent = "chat"
+        return result
+    except Exception as e:
+        log.debug("with_structured_output 失败，回退 JSON 解析 | error={}", str(e))
+        response = llm.invoke(messages)
+        return _parse_intent_json(response.content)
+
+
 def intent_parser_node(state: AgentState) -> dict:
     """调用 LLM 进行意图识别和槽位抽取，将结果写入 State。"""
     trace_id = state.get("trace_id", "-")
@@ -37,13 +52,11 @@ def intent_parser_node(state: AgentState) -> dict:
     log.info("意图识别开始")
 
     messages = state.get("messages", [])
+    prompt_messages = [SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages
 
     try:
         llm = get_llm("primary")
-        response = llm.invoke(
-            [SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages
-        )
-        result = _parse_intent_json(response.content)
+        result = _invoke_structured(llm, prompt_messages, log)
         log.info("意图识别完成 | intent={} | slots={}", result.intent, {
             "budget": result.budget,
             "category": result.category,
@@ -55,10 +68,7 @@ def intent_parser_node(state: AgentState) -> dict:
         log.warning("主模型意图识别失败，使用 fallback 重试 | error={}", str(e))
         try:
             fallback_llm = get_llm("fallback")
-            response = fallback_llm.invoke(
-                [SystemMessage(content=INTENT_SYSTEM_PROMPT)] + messages
-            )
-            result = _parse_intent_json(response.content)
+            result = _invoke_structured(fallback_llm, prompt_messages, log)
             log.info("Fallback 意图识别完成 | intent={}", result.intent)
         except Exception as fallback_err:
             log.error("意图识别彻底失败，回退到 chat 意图 | error={}", str(fallback_err))

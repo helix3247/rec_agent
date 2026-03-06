@@ -28,6 +28,9 @@ INTENT_SYSTEM_PROMPT = """你是一个电商导购意图识别专家。你的任
 6. **plan** — 复杂任务规划。用户提出了一个需要拆解为多步子任务的复杂需求。
    - 示例："去西藏旅游需要准备哪些装备"、"组建一套家庭影院"
 
+7. **tool** — 工具调用。用户需要执行非对话类的操作，如查询订单状态、物流信息等。
+   - 示例："查一下我的订单状态"、"快递到哪了"、"帮我取消订单"
+
 ## 槽位抽取
 
 在识别意图的同时，请从用户输入中提取以下槽位信息（如果有的话）：
@@ -47,19 +50,7 @@ INTENT_SYSTEM_PROMPT = """你是一个电商导购意图识别专家。你的任
 
 ## 输出要求
 
-请严格按照以下 JSON 格式输出结果，不要输出任何额外的文字说明，只输出纯 JSON：
-
-```json
-{
-  "intent": "search",
-  "budget": "5000元以内",
-  "category": "相机",
-  "scenario": "旅行",
-  "style": null,
-  "must_have": null
-}
-```
-
-- intent 字段必须是以下之一：search, outfit, qa, chat, compare, plan
+按照给定的 JSON Schema 结构输出结果：
+- intent 字段必须是以下之一：search, outfit, qa, chat, compare, plan, tool
 - 槽位字段如果用户未提及，请设置为 null
 """

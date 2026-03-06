@@ -112,7 +112,7 @@ def dialog_node(state: AgentState) -> dict:
     DialogFlowAgent 主节点。
     - 如果来自 Dispatcher 的澄清请求（intent 为 search/outfit 但缺槽位），生成追问。
     - 如果 intent 为 chat，进行闲聊回复。
-    - 同时负责 Redis 对话历史的存取。
+    - 负责将本轮对话保存到 Redis（历史已由 API 层加载并注入 state.messages）。
     """
     trace_id = state.get("trace_id", "-")
     thread_id = state.get("thread_id", "")
@@ -121,32 +121,25 @@ def dialog_node(state: AgentState) -> dict:
     messages = list(state.get("messages", []))
     log = get_logger(agent_name="DialogFlow", trace_id=trace_id)
 
-    log.info("DialogFlow 开始 | intent={} | thread_id={}", intent, thread_id)
+    log.info("DialogFlow 开始 | intent={} | thread_id={} | messages_count={}", intent, thread_id, len(messages))
 
-    # 从 Redis 加载历史对话，与当前 messages 合并
-    history = load_history(thread_id)
-    if history:
-        log.info("加载历史对话 | count={}", len(history))
-
-    # 合并 Redis 中积累的槽位
+    # 合并 Redis 中积累的槽位与当前 state 中的槽位
     stored_slots = load_slots(thread_id)
     merged_slots = {**stored_slots, **{k: v for k, v in slots.items() if v}}
 
-    # 判断是澄清式追问还是闲聊
     missing = _find_missing_slots(intent, merged_slots)
 
     if missing and intent in ("search", "outfit"):
         log.info("槽位缺失，生成追问 | missing={}", missing)
-        reply = _generate_clarification(intent, merged_slots, missing, history + messages, log)
+        reply = _generate_clarification(intent, merged_slots, missing, messages, log)
         task_status = "clarifying"
     else:
         log.info("进入闲聊/通用对话模式")
-        reply = _generate_chat_reply(history + messages, log)
+        reply = _generate_chat_reply(messages, log)
         task_status = "completed"
 
-    # 将本轮对话保存到 Redis
-    updated_messages = messages + [AIMessage(content=reply)]
-    save_history(thread_id, history + updated_messages)
+    # 将包含本轮回复的完整对话保存到 Redis
+    save_history(thread_id, messages + [AIMessage(content=reply)])
     save_slots(thread_id, merged_slots)
 
     log.info("DialogFlow 完成 | status={}", task_status)

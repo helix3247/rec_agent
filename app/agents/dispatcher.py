@@ -39,12 +39,14 @@ def dispatch_route(state: AgentState) -> str:
 
     路由规则:
         - search/outfit 且关键槽位缺失 -> dialog（追问）
-        - search/compare -> shopping
-        - outfit -> shopping（阶段三仍由 ShoppingAgent 兜底，阶段四换 OutfitAgent）
-        - qa -> shopping（阶段三仍由 Mock ShoppingAgent 兜底，阶段四换 RAGAgent）
-        - chat/unknown -> dialog
-        - plan -> shopping（阶段三仍由 Mock 兜底，阶段五换 PlannerNode）
-        - tool -> shopping（阶段四换 ToolCallAgent）
+        - search   -> shopping
+        - outfit   -> outfit
+        - qa       -> rag
+        - tool     -> tool_call
+        - compare  -> shopping（对比模式）
+        - plan     -> planner
+        - chat     -> dialog
+        - unknown  -> dialog（澄清）
     """
     intent = state.get("user_intent", "unknown")
     slots = state.get("slots", {})
@@ -56,10 +58,11 @@ def dispatch_route(state: AgentState) -> str:
 
     route_map = {
         "search": "shopping",
-        "outfit": "shopping",
-        "qa": "shopping",
+        "outfit": "outfit",
+        "qa": "rag",
+        "tool": "tool_call",
         "compare": "shopping",
-        "plan": "shopping",
+        "plan": "planner",
         "chat": "dialog",
         "unknown": "dialog",
     }
