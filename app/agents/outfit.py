@@ -1,33 +1,186 @@
 """
 app/agents/outfit.py
-OutfitAgent — Mock 版本。
-阶段四将实现跨品类穿搭组合推荐。
+OutfitAgent —— 穿搭/组合推荐。
+将跨品类需求拆解为多次检索并整合，生成全身搭配方案。
 """
 
-from langchain_core.messages import AIMessage
+import re
+
+from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
+from app.core.llm import get_llm
 from app.core.logger import get_logger
+from app.tools.search import search_products
+from app.tools.db import get_user_profile
+from app.tools.personalization import rerank_by_user_profile
+from app.prompts.outfit import OUTFIT_SYSTEM_PROMPT
+
+
+# 穿搭品类拆解
+_OUTFIT_CATEGORIES = ["上衣", "裤子", "鞋子", "配饰"]
+
+# 场景 -> 关联标签
+_SCENARIO_TAGS = {
+    "通勤": ["商务", "正式", "简约", "百搭"],
+    "约会": ["时尚", "精致", "优雅"],
+    "休闲": ["休闲", "舒适", "运动", "百搭"],
+    "运动": ["运动", "透气", "速干"],
+    "旅行": ["户外", "舒适", "防风", "轻便"],
+}
+
+
+def _parse_price_per_category(budget_str: str) -> float | None:
+    """将总预算平均分配到各品类。"""
+    if not budget_str:
+        return None
+
+    budget_str = budget_str.replace("元", "").replace("块", "").replace("¥", "").replace("￥", "")
+
+    m = re.search(r"(\d+)", budget_str)
+    if m:
+        total = float(m.group(1))
+        return total / len(_OUTFIT_CATEGORIES)
+    return None
+
+
+def _format_category_products(category_results: dict[str, list[dict]]) -> str:
+    """格式化各品类检索结果。"""
+    lines = []
+    for cat, products in category_results.items():
+        lines.append(f"\n## {cat}")
+        if not products:
+            lines.append("  （未检索到相关商品）")
+            continue
+        for i, p in enumerate(products[:5], 1):
+            lines.append(
+                f"  {i}. [{p.get('brand', '')}] {p.get('name', '')} "
+                f"| ¥{p.get('price', 0)} "
+                f"| 标签: {', '.join(p.get('tags', [])[:3])}"
+            )
+    return "\n".join(lines)
+
+
+def _build_outfit_candidates(category_results: dict[str, list[dict]]) -> list[dict]:
+    """从各品类中选取最佳商品构建候选列表。"""
+    candidates = []
+    for cat, products in category_results.items():
+        if products:
+            top = products[0]
+            candidates.append({
+                "product_id": top.get("product_id", ""),
+                "title": f"[{cat}] {top.get('name', '')}",
+                "price": top.get("price", 0),
+                "reason": f"{cat}推荐 | {top.get('brand', '')} | {', '.join(top.get('tags', [])[:3])}",
+            })
+    return candidates
 
 
 def outfit_node(state: AgentState) -> dict:
-    """Mock: 返回固定的穿搭推荐结果。"""
+    """OutfitAgent 节点：多品类检索 -> 个性化排序 -> LLM 生成穿搭方案。"""
     trace_id = state.get("trace_id", "-")
+    user_id = state.get("user_id", "")
+    slots = state.get("slots", {})
+    messages = state.get("messages", [])
     log = get_logger(agent_name="OutfitAgent", trace_id=trace_id)
-    log.info("穿搭推荐开始 (Mock)")
 
-    mock_response = "这是 Mock 的穿搭推荐：白色T恤 + 卡其色休闲裤 + 白色帆布鞋"
-    mock_candidates = [
-        {"product_id": "mock-outfit-001", "title": "白色基础T恤", "price": 99, "reason": "百搭基础款"},
-        {"product_id": "mock-outfit-002", "title": "卡其色休闲裤", "price": 199, "reason": "通勤休闲两用"},
-        {"product_id": "mock-outfit-003", "title": "白色帆布鞋", "price": 299, "reason": "经典百搭"},
-    ]
+    log.info("穿搭推荐开始 | slots={}", slots)
 
-    log.info("穿搭推荐完成 | candidates_count={}", len(mock_candidates))
+    # 获取用户查询
+    query = ""
+    for msg in reversed(messages):
+        if hasattr(msg, "type") and msg.type == "human":
+            query = msg.content
+            break
+
+    scenario = slots.get("scenario", "")
+    style = slots.get("style", "")
+    budget = slots.get("budget", "")
+    price_per_cat = _parse_price_per_category(budget)
+
+    # 获取用户画像
+    user_profile = None
+    if user_id:
+        try:
+            user_profile = get_user_profile(user_id)
+        except Exception as e:
+            log.warning("用户画像获取失败 | error={}", str(e))
+
+    # 场景关联标签
+    scenario_tags = _SCENARIO_TAGS.get(scenario, [])
+
+    # ── 多品类检索 ──
+    category_results: dict[str, list[dict]] = {}
+    for cat in _OUTFIT_CATEGORIES:
+        search_query = f"{scenario} {style} {cat}".strip() or cat
+        try:
+            products = search_products(
+                query=search_query,
+                category=cat,
+                max_price=price_per_cat,
+                tags=scenario_tags or None,
+                top_k=5,
+            )
+            # 如果标签过滤结果太少，放宽条件重试
+            if len(products) < 3:
+                products = search_products(
+                    query=search_query,
+                    category=cat,
+                    max_price=price_per_cat,
+                    top_k=5,
+                )
+            products = rerank_by_user_profile(products, user_profile)
+            category_results[cat] = products
+            log.info("品类 {} 检索返回 {} 个商品", cat, len(products))
+        except Exception as e:
+            log.error("品类 {} 检索失败 | error={}", cat, str(e))
+            category_results[cat] = []
+
+    # ── LLM 生成穿搭方案 ──
+    category_products_text = _format_category_products(category_results)
+
+    system_prompt = OUTFIT_SYSTEM_PROMPT.format(
+        query=query,
+        scenario=scenario or "未指定",
+        style=style or "未指定",
+        budget=budget or "不限",
+        category_products=category_products_text,
+    )
+
+    try:
+        llm = get_llm("primary")
+        llm_messages = [SystemMessage(content=system_prompt)] + messages
+        response = llm.invoke(llm_messages)
+        reply = response.content
+    except Exception as e:
+        log.warning("主模型调用失败，使用 fallback | error={}", str(e))
+        try:
+            llm = get_llm("fallback")
+            llm_messages = [SystemMessage(content=system_prompt)] + messages
+            response = llm.invoke(llm_messages)
+            reply = response.content
+        except Exception:
+            reply = _build_fallback_response(category_results)
+
+    candidates = _build_outfit_candidates(category_results)
+
+    log.info("穿搭推荐完成 | candidates_count={}", len(candidates))
     return {
         "current_agent": "OutfitAgent",
-        "response": mock_response,
-        "candidates": mock_candidates,
-        "messages": [AIMessage(content=mock_response)],
+        "response": reply,
+        "candidates": candidates,
+        "messages": [AIMessage(content=reply)],
         "task_status": "completed",
     }
+
+
+def _build_fallback_response(category_results: dict[str, list[dict]]) -> str:
+    """LLM 不可用时的降级回答。"""
+    lines = ["为您推荐以下穿搭方案：\n"]
+    for cat, products in category_results.items():
+        if products:
+            top = products[0]
+            lines.append(f"- {cat}：{top.get('name', '')}（{top.get('brand', '')}，¥{top.get('price', 0)}）")
+        else:
+            lines.append(f"- {cat}：暂无推荐")
+    return "\n".join(lines)

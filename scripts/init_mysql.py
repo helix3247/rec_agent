@@ -72,8 +72,19 @@ CREATE TABLE IF NOT EXISTS orders (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='订单表';
 """
 
-DROP_ORDER = ["orders", "interactions", "products", "users"]
-ALL_DDL = [DDL_USERS, DDL_PRODUCTS, DDL_INTERACTIONS, DDL_ORDERS]
+DDL_FAVORITES = """
+CREATE TABLE IF NOT EXISTS favorites (
+    id          BIGINT      NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    user_id     VARCHAR(36) NOT NULL COMMENT '用户ID',
+    product_id  VARCHAR(36) NOT NULL COMMENT '商品ID',
+    created_at  TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_user_product (user_id, product_id),
+    INDEX idx_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户收藏夹';
+"""
+
+DROP_ORDER = ["favorites", "orders", "interactions", "products", "users"]
+ALL_DDL = [DDL_USERS, DDL_PRODUCTS, DDL_INTERACTIONS, DDL_ORDERS, DDL_FAVORITES]
 
 
 # ─────────────────────────── 工具函数 ───────────────────────────
@@ -205,6 +216,30 @@ def insert_orders(conn: pymysql.connections.Connection, orders: list) -> int:
     return len(orders)
 
 
+def insert_favorites(conn: pymysql.connections.Connection, interactions: list) -> int:
+    """从用户交互数据中提取 like 行为生成收藏夹记录。"""
+    likes = [i for i in interactions if i.get("action") == "like"]
+    if not likes:
+        return 0
+
+    seen = set()
+    unique_likes = []
+    for item in likes:
+        key = (item["user_id"], item["product_id"])
+        if key not in seen:
+            seen.add(key)
+            unique_likes.append(item)
+
+    sql = """
+        INSERT IGNORE INTO favorites (user_id, product_id)
+        VALUES (%(user_id)s, %(product_id)s)
+    """
+    with conn.cursor() as cursor:
+        cursor.executemany(sql, unique_likes)
+    conn.commit()
+    return len(unique_likes)
+
+
 # ─────────────────────────── 主流程 ───────────────────────────
 
 def main(drop_existing: bool) -> None:
@@ -245,6 +280,8 @@ def main(drop_existing: bool) -> None:
     print(f"  交互写入 {n_interactions} 条")
     n_orders = insert_orders(conn, orders)
     print(f"  订单写入 {n_orders} 条")
+    n_favorites = insert_favorites(conn, interactions)
+    print(f"  收藏夹写入 {n_favorites} 条")
 
     conn.close()
     print("✓ MySQL 初始化完成！")

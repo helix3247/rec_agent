@@ -22,6 +22,7 @@ class CandidateItem(BaseModel):
     title: str = ""
     price: float = 0.0
     reason: str = ""
+    pros_cons: Optional[str] = Field(None, description="优缺点简评")
 
 
 class ChatResponse(BaseModel):
