@@ -27,7 +27,7 @@ def get_llm(model_type: ModelType = "primary", **kwargs) -> ChatOpenAI:
     """
     llm_cfg = settings.llm
 
-    if model_type == "primary":
+    if model_type != "primary":
         return ChatOpenAI(
             api_key=llm_cfg.llm_api_key,
             base_url=llm_cfg.llm_base_url,

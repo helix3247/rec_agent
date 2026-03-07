@@ -50,7 +50,20 @@ INTENT_SYSTEM_PROMPT = """你是一个电商导购意图识别专家。你的任
 
 ## 输出要求
 
-按照给定的 JSON Schema 结构输出结果：
+请严格按照以下 JSON 格式输出，不要输出任何额外的文字说明，只输出纯 JSON：
+
+```json
+{
+  "intent": "search",
+  "budget": "5000元以内",
+  "category": "相机",
+  "scenario": "旅行",
+  "style": null,
+  "must_have": null
+}
+```
+
 - intent 字段必须是以下之一：search, outfit, qa, chat, compare, plan, tool
+- 槽位字段（budget, category, scenario, style, must_have）必须作为顶层字段输出，不要嵌套在 slots 对象中
 - 槽位字段如果用户未提及，请设置为 null
 """

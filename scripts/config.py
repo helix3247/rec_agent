@@ -19,13 +19,23 @@ MOCK_DATA_FILE = DATA_DIR / "mock_data.json"
 
 # ─────────────────────────── 数据规模配置 ───────────────────────────
 DATA_CONFIG = {
-    # 商品数量（50~100 之间）
-    "num_products": 80,
+    # 商品数量（建议 200~500 之间）
+    "num_products": 320,
     # 用户数量
-    "num_users": 10,
-    # 每个商品生成的评论 / 说明书条数（3~5 之间随机取）
-    "reviews_per_product_min": 3,
-    "reviews_per_product_max": 5,
+    "num_users": 80,
+    # 每个商品生成的评论条数（5~12 之间随机取）
+    "reviews_per_product_min": 5,
+    "reviews_per_product_max": 12,
+    # FAQ / 说明书条数（每个商品）
+    "faq_per_product_min": 1,
+    "faq_per_product_max": 3,
+    "manual_per_product_min": 1,
+    "manual_per_product_max": 2,
+    # 每个用户生成的交互/订单数量
+    "interactions_per_user_min": 8,
+    "interactions_per_user_max": 25,
+    "orders_per_user_min": 1,
+    "orders_per_user_max": 5,
     # 随机种子（设为 None 则每次结果不同）
     "random_seed": 42,
 }

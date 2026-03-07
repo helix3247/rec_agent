@@ -3,15 +3,15 @@ version: "3.8"
 services:
   # ─────────────────── MySQL 8.0 ───────────────────
   mysql:
-    image: mysql:8.0
+    image: mysql:latest
     container_name: rec-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_ROOT_PASSWORD: 123456
       MYSQL_DATABASE: rec_agent
       MYSQL_CHARSET: utf8mb4
     ports:
-      - "3306:3306"
+      - "23306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
@@ -23,13 +23,13 @@ services:
 
   # ─────────────────── Redis ───────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:8.4
     container_name: rec-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - ./volumes/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -38,29 +38,54 @@ services:
 
   # ─────────────────── Elasticsearch 8.x ───────────────────
   elasticsearch:
-    image: elasticsearch:8.15.0
+    image: elasticsearch:9.3.0
     container_name: rec-elasticsearch
     restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if ! /usr/share/elasticsearch/bin/elasticsearch-plugin list | grep -q "^analysis-ik$"; then
+          /usr/share/elasticsearch/bin/elasticsearch-plugin install --batch analysis-ik;
+        fi
+        exec /usr/local/bin/docker-entrypoint.sh
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false
+      - ELASTIC_PASSWORD=AuM_JuNzR3kzOW=vkNYA
+      - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=false
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
     ports:
-      - "9200:9200"
+      - "29200:9200"
     volumes:
-      - es_data:/usr/share/elasticsearch/data
+      - ./volumes/elasticsearch:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -u elastic:AuM_JuNzR3kzOW=vkNYA http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
 
   # ─────────────────── Milvus Standalone ───────────────────
   milvus:
-    image: milvusdb/milvus:v2.4.17
-    container_name: rec-milvus
+    image: milvusdb/milvus:v2.6.11
+    container_name: milvus-standalone
     restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - |
+        mkdir -p /milvus/configs &&
+        cat > /milvus/configs/embedEtcd.yaml <<'EOF'
+        listen-client-urls: http://0.0.0.0:2379
+        advertise-client-urls: http://0.0.0.0:2379
+        quota-backend-bytes: 4294967296
+        auto-compaction-mode: revision
+        auto-compaction-retention: '1000'
+        EOF
+        cat > /milvus/configs/user.yaml <<'EOF'
+        # Extra config to override default milvus.yaml
+        EOF
+        exec milvus run standalone
     security_opt:
       - seccomp:unconfined
     environment:
@@ -72,10 +97,9 @@ services:
     ports:
       - "19530:19530"
       - "9091:9091"
+      - "2379:2379"
     volumes:
       - milvus_data:/var/lib/milvus
-      - ./embedEtcd.yaml:/milvus/configs/embedEtcd.yaml:ro
-      - ./user.yaml:/milvus/configs/user.yaml:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:9091/healthz || exit 1"]
       interval: 30s
@@ -85,6 +109,4 @@ services:
 
 volumes:
   mysql_data:
-  redis_data:
-  es_data:
   milvus_data:

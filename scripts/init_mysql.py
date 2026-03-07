@@ -174,6 +174,37 @@ def insert_products(conn: pymysql.connections.Connection, products: list) -> int
     return len(rows)
 
 
+def insert_interactions(conn: pymysql.connections.Connection, interactions: list) -> int:
+    if not interactions:
+        return 0
+    sql = """
+        INSERT INTO interactions
+            (user_id, product_id, action, session_id)
+        VALUES
+            (%(user_id)s, %(product_id)s, %(action)s, %(session_id)s)
+    """
+    with conn.cursor() as cursor:
+        cursor.executemany(sql, interactions)
+    conn.commit()
+    return len(interactions)
+
+
+def insert_orders(conn: pymysql.connections.Connection, orders: list) -> int:
+    if not orders:
+        return 0
+    sql = """
+        INSERT INTO orders
+            (order_id, user_id, product_id, quantity, total_price, status)
+        VALUES
+            (%(order_id)s, %(user_id)s, %(product_id)s,
+             %(quantity)s, %(total_price)s, %(status)s)
+    """
+    with conn.cursor() as cursor:
+        cursor.executemany(sql, orders)
+    conn.commit()
+    return len(orders)
+
+
 # ─────────────────────────── 主流程 ───────────────────────────
 
 def main(drop_existing: bool) -> None:
@@ -187,7 +218,12 @@ def main(drop_existing: bool) -> None:
         mock_data = json.load(f)
     users = mock_data.get("users", [])
     products = mock_data.get("products", [])
-    print(f"  用户 {len(users)} 条，商品 {len(products)} 条")
+    interactions = mock_data.get("interactions", [])
+    orders = mock_data.get("orders", [])
+    print(
+        f"  用户 {len(users)} 条，商品 {len(products)} 条，"
+        f"交互 {len(interactions)} 条，订单 {len(orders)} 条"
+    )
 
     print("[2/4] 连接 MySQL ...")
     conn = get_connection()
@@ -205,6 +241,10 @@ def main(drop_existing: bool) -> None:
     print(f"  用户写入 {n_users} 条")
     n_products = insert_products(conn, products)
     print(f"  商品写入 {n_products} 条")
+    n_interactions = insert_interactions(conn, interactions)
+    print(f"  交互写入 {n_interactions} 条")
+    n_orders = insert_orders(conn, orders)
+    print(f"  订单写入 {n_orders} 条")
 
     conn.close()
     print("✓ MySQL 初始化完成！")

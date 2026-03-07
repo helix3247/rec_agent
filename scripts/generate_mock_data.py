@@ -11,7 +11,6 @@ import argparse
 import json
 import random
 import uuid
-from pathlib import Path
 
 from config import DATA_CONFIG, DATA_DIR, MOCK_DATA_FILE
 
@@ -76,6 +75,67 @@ CLOTHING_REVIEW_TEMPLATES = [
     "{brand}的品控一如既往稳定，{type}穿了一整个{season}，弹性和颜色都没怎么变。",
 ]
 
+# ─────────────────────────── 手机素材库 ───────────────────────────
+PHONE_BRANDS = ["Apple", "Samsung", "Xiaomi", "Huawei", "OPPO", "vivo", "OnePlus"]
+PHONE_SERIES = ["iPhone 16", "Galaxy S25", "Xiaomi 14", "Mate 60", "Find X7", "X100 Pro", "OnePlus 12"]
+PHONE_ADJECTIVES = ["旗舰", "影像旗舰", "性能旗舰", "轻薄", "长续航", "游戏向"]
+PHONE_TAGS_POOL = ["高刷新率", "长续航", "快充", "影像", "轻薄", "游戏", "护眼屏"]
+PHONE_SPECS_TEMPLATES = [
+    {"屏幕": "{screen}", "芯片": "{chip}", "电池": "{battery}", "相机": "{camera}"},
+]
+PHONE_SCREEN_OPTIONS = ["6.7英寸 OLED", "6.5英寸 AMOLED", "6.8英寸 LTPO OLED"]
+PHONE_CHIP_OPTIONS = ["骁龙8 Gen3", "天玑9300", "A18", "麒麟9000S"]
+PHONE_BATTERY_OPTIONS = ["5000mAh", "4800mAh", "5200mAh"]
+PHONE_CAMERA_OPTIONS = ["5000万三摄", "4800万双摄", "1英寸主摄", "长焦潜望式"]
+PHONE_USE_CASES = ["日常通勤", "摄影爱好", "手游玩家", "商务办公", "学生党"]
+
+PHONE_DESC_TEMPLATES = [
+    "{brand} {model} 定位{adj}，配备{screen}与{chip}，{battery}续航，{camera}。"
+    "适合{use_case}用户，{tag1}表现突出。",
+    "{brand} {model} 主打{adj}体验，{screen}屏幕，{chip}处理器，{camera}成像，"
+    "{battery}电池，兼顾{tag1}与{tag2}。",
+]
+
+PHONE_REVIEW_TEMPLATES = [
+    "入手{brand} {model}后，{feature}体验很惊艳，{scenario}场景续航也稳。",
+    "对比了{compare}，最终选了这款，{feature}很满足，唯一小遗憾是{weakness}。",
+    "屏幕{screen}观感不错，{tag}体验明显，日常{use_case}完全够用。",
+    "相机{camera}确实给力，{scenario}拍照细节清晰，质感不错。",
+]
+
+# ─────────────────────────── 运动鞋素材库 ───────────────────────────
+SHOE_BRANDS = ["Nike", "Adidas", "New Balance", "ASICS", "Puma", "李宁", "安踏"]
+SHOE_TYPES = ["跑鞋", "训练鞋", "篮球鞋", "休闲鞋", "板鞋", "户外鞋"]
+SHOE_ADJECTIVES = ["缓震", "轻量", "稳定", "透气", "耐磨", "支撑"]
+SHOE_TAGS_POOL = ["缓震", "轻便", "耐磨", "透气", "稳定", "防滑", "百搭"]
+SHOE_MATERIALS = ["网布", "针织", "合成革", "织物+TPU", "麂皮"]
+SHOE_COLORS = ["黑白", "灰白", "蓝黑", "米白", "全黑", "蓝灰"]
+SHOE_USE_CASES = ["跑步", "健身训练", "日常通勤", "球场运动", "长途步行"]
+
+SHOE_DESC_TEMPLATES = [
+    "{brand} {adj}{type}，{material}鞋面，{color}配色，{tag1}与{tag2}兼顾，适合{use_case}。",
+    "{brand} {type} 主打{adj}脚感，{material}材质，{color}外观，{tag1}表现突出。",
+]
+
+SHOE_REVIEW_TEMPLATES = [
+    "{brand}这双{type}{adj}感很明显，{use_case}穿着舒服，{tag}表现不错。",
+    "上脚轻盈，{material}透气，{color}很百搭，适合{use_case}。",
+    "缓震不错，但在{weakness}场景稍弱，总体性价比高。",
+    "对比过{compare}，最后选了这款，{tag}体验更适合我。",
+]
+
+# ─────────────────────────── 文档/FAQ 模板 ───────────────────────────
+FAQ_TEMPLATES = [
+    "Q: {product} 适合什么场景？A: 适合{use_case}场景，{tag1}表现突出。",
+    "Q: {product} 续航/耐用性如何？A: {battery}表现稳定，日常使用足够。",
+    "Q: {product} 有哪些核心卖点？A: {tag1}、{tag2}与{feature}是主要亮点。",
+]
+
+MANUAL_TEMPLATES = [
+    "{product} 使用说明：首次使用建议完成基础设置，按需开启{feature}功能。",
+    "{product} 保养建议：保持干燥清洁，避免极端环境影响{feature}表现。",
+]
+
 # ─────────────────────────── 用户画像模板 ───────────────────────────
 USER_PROFILES = [
     {"name": "张明", "age": 28, "gender": "male", "budget_level": "mid",
@@ -99,6 +159,12 @@ USER_PROFILES = [
     {"name": "郑宇", "age": 24, "gender": "male", "budget_level": "mid",
      "style_preference": ["复古", "潮流"], "category_interest": ["男装", "数码相机"]},
 ]
+
+NAME_MALE_POOL = ["张明", "李浩", "王磊", "陈晨", "刘阳", "周峰", "吴凯", "郑宇", "赵凯", "宋涛"]
+NAME_FEMALE_POOL = ["赵雪", "孙嘉", "林琪", "周雅", "唐琪", "许倩", "陈欣", "李萌", "方晴", "苏菲"]
+STYLE_TAG_POOL = list(set(CLOTHING_TAGS_POOL + CAMERA_TAGS_POOL + PHONE_TAGS_POOL + SHOE_TAGS_POOL))
+CATEGORY_INTEREST_POOL = ["数码相机", "男装", "手机", "运动鞋"]
+BUDGET_LEVELS = ["low", "mid", "high"]
 
 
 # ─────────────────────────── 生成函数 ───────────────────────────
@@ -146,7 +212,7 @@ def _generate_camera(product_id: str) -> dict:
 def _generate_camera_reviews(product: dict, n: int) -> list:
     meta = product["_meta"]
     reviews = []
-    for i in range(n):
+    for _ in range(n):
         tmpl = random.choice(CAMERA_REVIEW_TEMPLATES)
         text = tmpl.format(
             brand=product["brand"],
@@ -231,46 +297,232 @@ def _generate_clothing_reviews(product: dict, n: int) -> list:
     return reviews
 
 
+def _generate_phone(product_id: str) -> dict:
+    brand = random.choice(PHONE_BRANDS)
+    model = random.choice(PHONE_SERIES)
+    adj = random.choice(PHONE_ADJECTIVES)
+    screen = random.choice(PHONE_SCREEN_OPTIONS)
+    chip = random.choice(PHONE_CHIP_OPTIONS)
+    battery = random.choice(PHONE_BATTERY_OPTIONS)
+    camera = random.choice(PHONE_CAMERA_OPTIONS)
+    tags = _rand_tags(PHONE_TAGS_POOL, 3)
+    tag1, tag2 = tags[0], tags[1] if len(tags) > 1 else tags[0]
+    use_case = random.choice(PHONE_USE_CASES)
+
+    specs = {"屏幕": screen, "芯片": chip, "电池": battery, "相机": camera}
+    desc_tmpl = random.choice(PHONE_DESC_TEMPLATES)
+    description = desc_tmpl.format(
+        brand=brand, model=model, adj=adj, screen=screen, chip=chip,
+        battery=battery, camera=camera, tag1=tag1, tag2=tag2, use_case=use_case,
+    )
+
+    price = round(random.uniform(1999, 8999), 2)
+
+    return {
+        "id": product_id,
+        "name": f"{brand} {model} {adj}",
+        "category": "手机",
+        "price": price,
+        "brand": brand,
+        "specs": specs,
+        "tags": tags,
+        "description": description,
+        "_meta": {"screen": screen, "chip": chip, "battery": battery,
+                  "camera": camera, "adj": adj, "use_case": use_case},
+    }
+
+
+def _generate_phone_reviews(product: dict, n: int) -> list:
+    meta = product["_meta"]
+    reviews = []
+    for _ in range(n):
+        tmpl = random.choice(PHONE_REVIEW_TEMPLATES)
+        text = tmpl.format(
+            brand=product["brand"],
+            model=product["name"].split(" ")[1] if len(product["name"].split(" ")) > 1 else "",
+            feature=random.choice(["快充", "影像", "高刷屏", "性能"]),
+            scenario=random.choice(["通勤路上", "夜景拍摄", "长时间游戏"]),
+            weakness=random.choice(["重量", "散热", "价格偏高"]),
+            compare=random.choice(PHONE_BRANDS),
+            screen=meta["screen"],
+            camera=meta["camera"],
+            tag=random.choice(product["tags"]),
+            use_case=meta["use_case"],
+        )
+        reviews.append({
+            "review_id": str(uuid.uuid4()),
+            "product_id": product["id"],
+            "type": "review",
+            "text": text,
+        })
+    return reviews
+
+
+def _generate_shoe(product_id: str) -> dict:
+    brand = random.choice(SHOE_BRANDS)
+    shoe_type = random.choice(SHOE_TYPES)
+    adj = random.choice(SHOE_ADJECTIVES)
+    material = random.choice(SHOE_MATERIALS)
+    color = random.choice(SHOE_COLORS)
+    tags = _rand_tags(SHOE_TAGS_POOL, 3)
+    tag1, tag2 = tags[0], tags[1] if len(tags) > 1 else tags[0]
+    use_case = random.choice(SHOE_USE_CASES)
+
+    specs = {"材质": material, "颜色": color, "特点": adj}
+    desc_tmpl = random.choice(SHOE_DESC_TEMPLATES)
+    description = desc_tmpl.format(
+        brand=brand, type=shoe_type, adj=adj, material=material,
+        color=color, tag1=tag1, tag2=tag2, use_case=use_case,
+    )
+
+    price = round(random.uniform(299, 1999), 2)
+
+    return {
+        "id": product_id,
+        "name": f"{brand} {adj}{shoe_type}",
+        "category": "运动鞋",
+        "price": price,
+        "brand": brand,
+        "specs": specs,
+        "tags": tags,
+        "description": description,
+        "_meta": {"type": shoe_type, "material": material, "color": color,
+                  "adj": adj, "use_case": use_case},
+    }
+
+
+def _generate_shoe_reviews(product: dict, n: int) -> list:
+    meta = product["_meta"]
+    reviews = []
+    for _ in range(n):
+        tmpl = random.choice(SHOE_REVIEW_TEMPLATES)
+        text = tmpl.format(
+            brand=product["brand"],
+            type=meta["type"],
+            adj=meta["adj"],
+            material=meta["material"],
+            color=meta["color"],
+            use_case=meta["use_case"],
+            tag=random.choice(product["tags"]),
+            weakness=random.choice(["雨天防滑", "长时间跑步"]),
+            compare=random.choice(SHOE_BRANDS),
+        )
+        reviews.append({
+            "review_id": str(uuid.uuid4()),
+            "product_id": product["id"],
+            "type": "review",
+            "text": text,
+        })
+    return reviews
+
+
+def _generate_faq_docs(product: dict, n: int) -> list:
+    meta = product["_meta"]
+    docs = []
+    for _ in range(n):
+        tmpl = random.choice(FAQ_TEMPLATES)
+        text = tmpl.format(
+            product=product["name"],
+            use_case=meta.get("use_case", "日常使用"),
+            tag1=random.choice(product["tags"]),
+            tag2=random.choice(product["tags"]),
+            feature=random.choice(list(product["specs"].keys())),
+            battery=meta.get("battery", "续航"),
+        )
+        docs.append({
+            "review_id": str(uuid.uuid4()),
+            "product_id": product["id"],
+            "type": "faq",
+            "text": text,
+        })
+    return docs
+
+
+def _generate_manual_docs(product: dict, n: int) -> list:
+    docs = []
+    for _ in range(n):
+        tmpl = random.choice(MANUAL_TEMPLATES)
+        text = tmpl.format(
+            product=product["name"],
+            feature=random.choice(list(product["specs"].keys())),
+        )
+        docs.append({
+            "review_id": str(uuid.uuid4()),
+            "product_id": product["id"],
+            "type": "manual",
+            "text": text,
+        })
+    return docs
+
+
 def generate_products(num_products: int) -> tuple[list, list]:
     """生成商品列表和对应的评论/文档列表。"""
     products, docs = [], []
 
-    # 相机和男装各占一半（相机数量稍多以体现高客单价场景）
-    num_cameras = num_products // 2 + num_products % 2
-    num_clothing = num_products - num_cameras
+    category_pool = (
+        ["camera"] * 30 +
+        ["clothing"] * 30 +
+        ["phone"] * 20 +
+        ["shoe"] * 20
+    )
 
-    for _ in range(num_cameras):
+    for _ in range(num_products):
         pid = str(uuid.uuid4())
-        product = _generate_camera(pid)
+        category = random.choice(category_pool)
+        if category == "camera":
+            product = _generate_camera(pid)
+            review_fn = _generate_camera_reviews
+        elif category == "clothing":
+            product = _generate_clothing(pid)
+            review_fn = _generate_clothing_reviews
+        elif category == "phone":
+            product = _generate_phone(pid)
+            review_fn = _generate_phone_reviews
+        else:
+            product = _generate_shoe(pid)
+            review_fn = _generate_shoe_reviews
+
         n_reviews = random.randint(
             DATA_CONFIG["reviews_per_product_min"],
             DATA_CONFIG["reviews_per_product_max"],
         )
-        reviews = _generate_camera_reviews(product, n_reviews)
-        # 移除临时元数据
-        product.pop("_meta")
-        products.append(product)
-        docs.extend(reviews)
-
-    for _ in range(num_clothing):
-        pid = str(uuid.uuid4())
-        product = _generate_clothing(pid)
-        n_reviews = random.randint(
-            DATA_CONFIG["reviews_per_product_min"],
-            DATA_CONFIG["reviews_per_product_max"],
+        n_faq = random.randint(
+            DATA_CONFIG["faq_per_product_min"],
+            DATA_CONFIG["faq_per_product_max"],
         )
-        reviews = _generate_clothing_reviews(product, n_reviews)
+        n_manual = random.randint(
+            DATA_CONFIG["manual_per_product_min"],
+            DATA_CONFIG["manual_per_product_max"],
+        )
+        reviews = review_fn(product, n_reviews)
+        faqs = _generate_faq_docs(product, n_faq)
+        manuals = _generate_manual_docs(product, n_manual)
+
         product.pop("_meta")
         products.append(product)
-        docs.extend(reviews)
+        docs.extend(reviews + faqs + manuals)
 
     return products, docs
 
 
-def generate_users() -> list:
-    """基于预设画像生成用户数据。"""
+def _generate_random_user() -> dict:
+    gender = random.choice(["male", "female"])
+    name_pool = NAME_MALE_POOL if gender == "male" else NAME_FEMALE_POOL
+    return {
+        "user_id": str(uuid.uuid4()),
+        "name": random.choice(name_pool),
+        "age": random.randint(18, 50),
+        "gender": gender,
+        "budget_level": random.choice(BUDGET_LEVELS),
+        "style_preference": _rand_tags(STYLE_TAG_POOL, random.randint(1, 3)),
+        "category_interest": _rand_tags(CATEGORY_INTEREST_POOL, random.randint(1, 3)),
+    }
+
+
+def generate_users(num_users: int) -> list:
+    """基于预设画像 + 随机扩展生成用户数据。"""
     users = []
-    for i, profile in enumerate(USER_PROFILES):
+    for profile in USER_PROFILES:
         users.append({
             "user_id": str(uuid.uuid4()),
             "name": profile["name"],
@@ -280,7 +532,53 @@ def generate_users() -> list:
             "style_preference": profile["style_preference"],
             "category_interest": profile["category_interest"],
         })
+    while len(users) < num_users:
+        users.append(_generate_random_user())
     return users
+
+
+def generate_interactions(users: list, products: list) -> list:
+    interactions = []
+    action_pool = ["view", "like", "cart", "purchase"]
+    action_weights = [0.55, 0.2, 0.15, 0.1]
+    for user in users:
+        n = random.randint(
+            DATA_CONFIG["interactions_per_user_min"],
+            DATA_CONFIG["interactions_per_user_max"],
+        )
+        for _ in range(n):
+            product = random.choice(products)
+            action = random.choices(action_pool, weights=action_weights, k=1)[0]
+            interactions.append({
+                "user_id": user["user_id"],
+                "product_id": product["id"],
+                "action": action,
+                "session_id": str(uuid.uuid4()),
+            })
+    return interactions
+
+
+def generate_orders(users: list, products: list) -> list:
+    orders = []
+    status_pool = ["pending", "paid", "shipped", "done", "cancelled"]
+    for user in users:
+        n = random.randint(
+            DATA_CONFIG["orders_per_user_min"],
+            DATA_CONFIG["orders_per_user_max"],
+        )
+        for _ in range(n):
+            product = random.choice(products)
+            quantity = random.randint(1, 3)
+            total_price = round(product["price"] * quantity, 2)
+            orders.append({
+                "order_id": str(uuid.uuid4()),
+                "user_id": user["user_id"],
+                "product_id": product["id"],
+                "quantity": quantity,
+                "total_price": total_price,
+                "status": random.choice(status_pool),
+            })
+    return orders
 
 
 def main(num_products: int, seed: int | None):
@@ -292,21 +590,28 @@ def main(num_products: int, seed: int | None):
     print(f"[1/3] 生成 {num_products} 个商品数据...")
     products, docs = generate_products(num_products)
 
-    print(f"[2/3] 生成 {len(USER_PROFILES)} 个用户数据...")
-    users = generate_users()
+    print(f"[2/4] 生成 {DATA_CONFIG['num_users']} 个用户数据...")
+    users = generate_users(DATA_CONFIG["num_users"])
+
+    print("[3/4] 生成用户交互与订单数据...")
+    interactions = generate_interactions(users, products)
+    orders = generate_orders(users, products)
 
     mock_data = {
         "products": products,
         "users": users,
+        "interactions": interactions,
+        "orders": orders,
         "docs": docs,
     }
 
-    print(f"[3/3] 写入 {MOCK_DATA_FILE} ...")
+    print(f"[4/4] 写入 {MOCK_DATA_FILE} ...")
     with open(MOCK_DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(mock_data, f, ensure_ascii=False, indent=2)
 
     print(
         f"✓ 完成！商品 {len(products)} 个，用户 {len(users)} 个，"
+        f"交互 {len(interactions)} 条，订单 {len(orders)} 条，"
         f"评论/文档 {len(docs)} 条，已保存至 {MOCK_DATA_FILE}"
     )
 
@@ -326,5 +631,5 @@ if __name__ == "__main__":
         help="随机种子（默认 42，传 -1 表示随机）",
     )
     args = parser.parse_args()
-    seed = None if args.seed == -1 else args.seed
-    main(num_products=args.num_products, seed=seed)
+    seed_value = None if args.seed == -1 else args.seed
+    main(num_products=args.num_products, seed=seed_value)

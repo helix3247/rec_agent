@@ -88,12 +88,12 @@ def _build_es_mapping(vector_dim: int) -> dict:
         "mappings": {
             "properties": {
                 "product_id":  {"type": "keyword"},
-                "name":        {"type": "text", "analyzer": "ik_max_word"},
+                "name":        {"type": "text", "analyzer": "standard"},
                 "category":    {"type": "keyword"},
                 "brand":       {"type": "keyword"},
                 "price":       {"type": "float"},
                 "tags":        {"type": "keyword"},
-                "description": {"type": "text", "analyzer": "ik_max_word"},
+                "description": {"type": "text", "analyzer": "standard"},
                 "embedding": {
                     "type": "dense_vector",
                     "dims": vector_dim,

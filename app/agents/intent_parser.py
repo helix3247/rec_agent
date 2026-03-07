@@ -19,7 +19,7 @@ _VALID_INTENTS = {"search", "outfit", "qa", "chat", "compare", "plan", "tool"}
 
 
 def _parse_intent_json(text: str) -> IntentResult:
-    """从 LLM 返回的文本中手动提取 JSON，作为 with_structured_output 的 fallback。"""
+    """从 LLM 返回的文本中提取 JSON 并解析为 IntentResult，兼容平铺和嵌套 slots 两种格式。"""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
@@ -28,6 +28,11 @@ def _parse_intent_json(text: str) -> IntentResult:
     data = json.loads(cleaned)
     if data.get("intent") not in _VALID_INTENTS:
         data["intent"] = "chat"
+    if "slots" in data and isinstance(data["slots"], dict):
+        slots = data.pop("slots")
+        for key in ("budget", "category", "scenario", "style", "must_have"):
+            if key not in data or data.get(key) is None:
+                data[key] = slots.get(key)
     return IntentResult(**data)
 
 
@@ -40,8 +45,9 @@ def _invoke_structured(llm, messages, log) -> IntentResult:
             result.intent = "chat"
         return result
     except Exception as e:
-        log.debug("with_structured_output 失败，回退 JSON 解析 | error={}", str(e))
+        log.info("with_structured_output 不可用，回退 JSON 解析 | error={}", str(e)[:80])
         response = llm.invoke(messages)
+        log.debug("LLM 原始输出 | content={}", response.content[:200])
         return _parse_intent_json(response.content)
 
 
