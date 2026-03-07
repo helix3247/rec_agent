@@ -106,9 +106,14 @@ def shopping_node(state: AgentState) -> dict:
     intent = state.get("user_intent", "search")
     slots = state.get("slots", {})
     messages = state.get("messages", [])
+    reflection_feedback = state.get("reflection_feedback", "")
+    retry_count = state.get("reflection_count", 0)
     log = get_logger(agent_name="ShoppingAgent", trace_id=trace_id)
 
-    log.info("导购推荐开始 | intent={} | slots={}", intent, slots)
+    log.info("导购推荐开始 | intent={} | slots={} | retry={}", intent, slots, retry_count)
+
+    if reflection_feedback:
+        log.info("收到反思修正建议 | feedback={}", reflection_feedback[:100])
 
     # 获取用户最后一条查询
     query = ""
@@ -117,25 +122,43 @@ def shopping_node(state: AgentState) -> dict:
             query = msg.content
             break
 
+    # 若 reflector 指示改写查询，则使用改写后的查询
+    if reflection_feedback and "改写查询为:" in reflection_feedback:
+        rewritten = reflection_feedback.split("改写查询为:")[-1].strip()
+        if rewritten:
+            log.info("使用反思改写查询 | original={} | rewritten={}", query, rewritten)
+            query = rewritten
+
     # ── 1. 解析检索参数 ──
     category = slots.get("category", "")
     budget = slots.get("budget", "")
     min_price, max_price = _parse_price_range(budget)
 
+    # 重试时若仍无结果，逐步放宽过滤
+    relax_category = retry_count >= 2
+
     log.info(
-        "检索参数 | query={} | category={} | price=[{}, {}]",
-        query, category, min_price, max_price,
+        "检索参数 | query={} | category={} | price=[{}, {}] | relax={}",
+        query, category, min_price, max_price, relax_category,
     )
 
     # ── 2. 调用 ES 检索 ──
     try:
         products = search_products(
             query=query,
-            category=category or None,
+            category=(category or None) if not relax_category else None,
             min_price=min_price,
             max_price=max_price,
             top_k=10,
         )
+        # 如果结果仍然不足且有价格限制，去掉价格限制再试一次
+        if len(products) < 3 and (min_price or max_price):
+            log.info("结果不足，放宽价格限制重试")
+            products = search_products(
+                query=query,
+                category=(category or None) if not relax_category else None,
+                top_k=10,
+            )
         log.info("ES 检索返回 {} 个商品", len(products))
     except Exception as e:
         log.error("商品检索失败 | error={}", str(e))

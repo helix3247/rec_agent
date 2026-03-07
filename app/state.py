@@ -19,6 +19,16 @@ class Slots(TypedDict, total=False):
     must_have: Optional[str]
 
 
+class PlanStep(TypedDict, total=False):
+    """Planner 拆解出的单个子任务步骤。"""
+    step: int
+    description: str
+    agent: str
+    params: dict[str, Any]
+    status: str
+    result: str
+
+
 class AgentState(TypedDict, total=False):
     """
     LangGraph 全局状态。
@@ -36,6 +46,11 @@ class AgentState(TypedDict, total=False):
         response      : 最终返回给用户的文本。
         candidates    : 候选商品列表。
         suggested_questions : 推荐的后续问题。
+        reflection_count    : Reflector 已重试次数。
+        reflection_feedback : Reflector 给上游 Agent 的修正建议。
+        plan_steps          : Planner 拆解出的子任务步骤列表。
+        plan_current_step   : Planner 当前执行到的步骤索引。
+        plan_results        : 各子任务执行结果的汇总。
     """
     messages: Annotated[list[BaseMessage], add_messages]
     user_intent: str
@@ -49,3 +64,8 @@ class AgentState(TypedDict, total=False):
     response: str
     candidates: list[dict[str, Any]]
     suggested_questions: list[str]
+    reflection_count: int
+    reflection_feedback: str
+    plan_steps: list[PlanStep]
+    plan_current_step: int
+    plan_results: list[dict[str, Any]]

@@ -82,9 +82,14 @@ def outfit_node(state: AgentState) -> dict:
     user_id = state.get("user_id", "")
     slots = state.get("slots", {})
     messages = state.get("messages", [])
+    reflection_feedback = state.get("reflection_feedback", "")
+    retry_count = state.get("reflection_count", 0)
     log = get_logger(agent_name="OutfitAgent", trace_id=trace_id)
 
-    log.info("穿搭推荐开始 | slots={}", slots)
+    log.info("穿搭推荐开始 | slots={} | retry={}", slots, retry_count)
+
+    if reflection_feedback:
+        log.info("收到反思修正建议 | feedback={}", reflection_feedback[:100])
 
     # 获取用户查询
     query = ""
@@ -109,6 +114,10 @@ def outfit_node(state: AgentState) -> dict:
     # 场景关联标签
     scenario_tags = _SCENARIO_TAGS.get(scenario, [])
 
+    # 重试时放宽价格限制
+    relax_price = retry_count >= 1
+    effective_price = None if relax_price else price_per_cat
+
     # ── 多品类检索 ──
     category_results: dict[str, list[dict]] = {}
     for cat in _OUTFIT_CATEGORIES:
@@ -117,7 +126,7 @@ def outfit_node(state: AgentState) -> dict:
             products = search_products(
                 query=search_query,
                 category=cat,
-                max_price=price_per_cat,
+                max_price=effective_price,
                 tags=scenario_tags or None,
                 top_k=5,
             )
@@ -126,7 +135,13 @@ def outfit_node(state: AgentState) -> dict:
                 products = search_products(
                     query=search_query,
                     category=cat,
-                    max_price=price_per_cat,
+                    max_price=effective_price,
+                    top_k=5,
+                )
+            # 仍不足则完全放开
+            if len(products) < 2:
+                products = search_products(
+                    query=cat,
                     top_k=5,
                 )
             products = rerank_by_user_profile(products, user_profile)
