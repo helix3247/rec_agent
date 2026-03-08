@@ -8,7 +8,12 @@ import time
 from typing import Optional
 
 from openai import OpenAI
-from elasticsearch import Elasticsearch
+from elasticsearch import (
+    ConnectionError as ESConnectionError,
+    ConnectionTimeout,
+    Elasticsearch,
+    TransportError,
+)
 
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -16,6 +21,8 @@ from app.core.reliability import (
     es_circuit_breaker,
     retry_with_backoff,
 )
+
+_TRANSIENT_ES_EXCEPTIONS = (ESConnectionError, ConnectionTimeout, TimeoutError, OSError)
 
 _logger = get_logger(agent_name="SearchTool")
 
@@ -136,15 +143,28 @@ def search_products(
         _logger.warning("ES 熔断器开启，跳过检索")
         return []
 
+    @retry_with_backoff(
+        max_retries=1,
+        base_delay=0.5,
+        max_delay=2.0,
+        retryable_exceptions=_TRANSIENT_ES_EXCEPTIONS,
+    )
+    def _do_es_search():
+        return es.search(index=index_name, body=body, request_timeout=15)
+
     try:
         t0 = time.time()
-        resp = es.search(index=index_name, body=body, request_timeout=15)
+        resp = _do_es_search()
         elapsed = round((time.time() - t0) * 1000)
         es_circuit_breaker.record_success()
         _logger.info("ES 检索完成 | hits={} | took={}ms", resp["hits"]["total"]["value"], elapsed)
+    except _TRANSIENT_ES_EXCEPTIONS as e:
+        es_circuit_breaker.record_failure()
+        _logger.error("ES 检索失败（瞬时故障，已重试） | error={}", str(e))
+        return []
     except Exception as e:
         es_circuit_breaker.record_failure()
-        _logger.error("ES 检索失败 | error={}", str(e))
+        _logger.error("ES 检索失败（非瞬时故障） | error={}", str(e))
         return []
 
     results = []

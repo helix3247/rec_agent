@@ -2,7 +2,14 @@
 app/agents/tool_call.py
 ToolCallAgent —— 通用工具执行器。
 处理非对话类的纯工具调用任务（查订单状态、物流查询等）。
+
+工具路由机制:
+    根据用户查询文本匹配工具类型，当前支持 order（订单查询），
+    预留 logistics（物流）、return（退货）、complaint（投诉）扩展点。
 """
+
+from enum import Enum
+from typing import NamedTuple
 
 from langchain_core.messages import AIMessage, SystemMessage
 
@@ -12,6 +19,59 @@ from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.tools.db import query_order_status
 from app.prompts.tool_call import TOOL_CALL_SYSTEM_PROMPT
+
+
+class ToolType(str, Enum):
+    """支持的工具类型。"""
+    ORDER = "order"
+    LOGISTICS = "logistics"
+    RETURN = "return"
+    COMPLAINT = "complaint"
+    UNKNOWN = "unknown"
+
+
+class ToolRouteResult(NamedTuple):
+    tool_type: ToolType
+    confidence: float
+
+
+_TOOL_KEYWORDS: dict[ToolType, list[str]] = {
+    ToolType.ORDER: ["订单", "下单", "购买", "付款", "支付", "买了", "订购", "交易"],
+    ToolType.LOGISTICS: ["物流", "快递", "配送", "发货", "运输", "到了吗", "到哪了", "签收"],
+    ToolType.RETURN: ["退货", "退款", "退回", "换货", "售后", "退换"],
+    ToolType.COMPLAINT: ["投诉", "举报", "不满", "差评", "问题反馈"],
+}
+
+
+def _route_to_tool(query: str) -> ToolRouteResult:
+    """
+    根据用户查询文本判断应该调用哪个工具。
+
+    通过关键词匹配计算各工具类型的得分，返回最匹配的工具及置信度。
+    当前仅 ORDER 工具有实际实现，其余类型预留扩展。
+
+    Args:
+        query: 用户查询文本。
+
+    Returns:
+        ToolRouteResult(tool_type, confidence)。
+    """
+    if not query:
+        return ToolRouteResult(ToolType.UNKNOWN, 0.0)
+
+    scores: dict[ToolType, int] = {}
+    for tool_type, keywords in _TOOL_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in query)
+        if score > 0:
+            scores[tool_type] = score
+
+    if not scores:
+        return ToolRouteResult(ToolType.ORDER, 0.3)
+
+    best_type = max(scores, key=scores.get)  # type: ignore[arg-type]
+    total_keywords = len(_TOOL_KEYWORDS[best_type])
+    confidence = min(scores[best_type] / max(total_keywords, 1), 1.0)
+    return ToolRouteResult(best_type, round(confidence, 2))
 
 
 _STATUS_LABELS = {
@@ -38,8 +98,47 @@ def _format_order_results(orders: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _execute_tool(tool_type: ToolType, user_id: str, query: str, log) -> tuple[str, list[dict]]:
+    """
+    根据工具类型执行对应工具，返回结果文本和调用日志。
+
+    当前仅 ORDER 有实际实现，其余类型返回预留提示。
+    """
+    tool_calls_log: list[dict] = []
+
+    if tool_type == ToolType.ORDER:
+        if not user_id:
+            return "（未提供用户 ID，无法查询订单信息）", tool_calls_log
+        try:
+            orders = query_order_status(user_id)
+            result = _format_order_results(orders)
+            log.info("订单查询完成 | orders_count={}", len(orders))
+            tool_calls_log.append({"tool_name": "query_order_status", "success": True})
+            return result, tool_calls_log
+        except Exception as e:
+            log.error("订单查询失败 | error={}", str(e))
+            tool_calls_log.append({"tool_name": "query_order_status", "success": False, "error": str(e)})
+            return "（订单查询失败，请稍后重试）", tool_calls_log
+
+    if tool_type == ToolType.LOGISTICS:
+        log.info("物流查询工具尚未实现，降级到订单查询")
+        return _execute_tool(ToolType.ORDER, user_id, query, log)
+
+    if tool_type == ToolType.RETURN:
+        log.info("退货工具尚未实现")
+        return "（退货/售后功能正在开发中，请联系客服处理）", tool_calls_log
+
+    if tool_type == ToolType.COMPLAINT:
+        log.info("投诉工具尚未实现")
+        return "（投诉功能正在开发中，请联系客服处理）", tool_calls_log
+
+    if user_id:
+        return _execute_tool(ToolType.ORDER, user_id, query, log)
+    return "（暂不支持该类型的查询）", tool_calls_log
+
+
 def tool_call_node(state: AgentState) -> dict:
-    """ToolCallAgent 节点：根据用户请求调用工具并返回结果。"""
+    """ToolCallAgent 节点：根据用户请求路由到对应工具并返回结果。"""
     t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     user_id = state.get("user_id", "")
@@ -54,21 +153,11 @@ def tool_call_node(state: AgentState) -> dict:
             query = msg.content
             break
 
-    tool_calls_log: list[dict] = []
+    route = _route_to_tool(query)
+    log.info("工具路由 | tool_type={} | confidence={}", route.tool_type.value, route.confidence)
+
     token_usage: dict[str, int] = {}
-    tool_result = ""
-    if user_id:
-        try:
-            orders = query_order_status(user_id)
-            tool_result = _format_order_results(orders)
-            log.info("订单查询完成 | orders_count={}", len(orders))
-            tool_calls_log.append({"tool_name": "query_order_status", "success": True})
-        except Exception as e:
-            log.error("订单查询失败 | error={}", str(e))
-            tool_result = "（订单查询失败，请稍后重试）"
-            tool_calls_log.append({"tool_name": "query_order_status", "success": False, "error": str(e)})
-    else:
-        tool_result = "（未提供用户 ID，无法查询订单信息）"
+    tool_result, tool_calls_log = _execute_tool(route.tool_type, user_id, query, log)
 
     system_prompt = TOOL_CALL_SYSTEM_PROMPT.format(query=query, tool_result=tool_result)
 

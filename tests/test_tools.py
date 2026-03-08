@@ -8,7 +8,7 @@ tests/test_tools.py
 
 import json
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -567,3 +567,370 @@ class TestMemoryHelpers:
         result = _fallback_summary(messages)
         assert "推荐相机" in result
         assert "预算5000" in result
+
+
+# ════════════════════════════════════════════════════════════
+#  memory Milvus 兼容性验证测试
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestMemoryMilvusCompat:
+    """验证 memory 模块与 Milvus 的插入/检索兼容性、向量维度及 collection 结构。"""
+
+    def _make_messages(self, count=4):
+        from langchain_core.messages import HumanMessage, AIMessage
+
+        msgs = []
+        for i in range(count):
+            if i % 2 == 0:
+                msgs.append(HumanMessage(content=f"用户消息 {i // 2 + 1}"))
+            else:
+                msgs.append(AIMessage(content=f"AI回复 {i // 2 + 1}"))
+        return msgs
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    @patch("app.tools.memory._summarize_conversation")
+    def test_migrate_insert_data_structure(self, mock_summarize, mock_embedding, mock_collection):
+        """验证 Milvus insert 的按列传入格式正确（6 个字段：user_id, thread_id, summary, preferences, timestamp, embedding）。"""
+        mock_summarize.return_value = "用户喜欢Sony品牌相机，预算5000元"
+        embedding_vec = [0.1] * 3072
+        mock_embedding.return_value = embedding_vec
+        mock_coll = MagicMock()
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import migrate_to_long_term
+
+        result = migrate_to_long_term("user-001", "thread-001", self._make_messages(4))
+
+        assert result is True
+        mock_coll.insert.assert_called_once()
+        insert_data = mock_coll.insert.call_args[0][0]
+        assert len(insert_data) == 6
+        assert insert_data[0] == ["user-001"]
+        assert insert_data[1] == ["thread-001"]
+        assert insert_data[2] == ["用户喜欢Sony品牌相机，预算5000元"]
+        assert isinstance(insert_data[4][0], int)
+        assert len(insert_data[5][0]) == 3072
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    @patch("app.tools.memory._summarize_conversation")
+    def test_migrate_embedding_dimension(self, mock_summarize, mock_embedding, mock_collection):
+        """验证插入的 embedding 维度与 _MEMORY_VECTOR_DIM 一致。"""
+        from app.tools.memory import _MEMORY_VECTOR_DIM
+
+        mock_summarize.return_value = "测试摘要"
+        mock_embedding.return_value = [0.5] * _MEMORY_VECTOR_DIM
+        mock_coll = MagicMock()
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import migrate_to_long_term
+
+        migrate_to_long_term("user-001", "thread-001", self._make_messages(4))
+
+        insert_data = mock_coll.insert.call_args[0][0]
+        assert len(insert_data[5][0]) == _MEMORY_VECTOR_DIM
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    @patch("app.tools.memory._summarize_conversation")
+    def test_migrate_preferences_extraction(self, mock_summarize, mock_embedding, mock_collection):
+        """验证偏好提取结果正确写入 preferences 字段。"""
+        mock_summarize.return_value = "用户偏好Nike品牌的运动风格鞋子，预算500元"
+        mock_embedding.return_value = [0.1] * 3072
+        mock_coll = MagicMock()
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import migrate_to_long_term
+
+        migrate_to_long_term("user-001", "thread-001", self._make_messages(4))
+
+        insert_data = mock_coll.insert.call_args[0][0]
+        preferences = json.loads(insert_data[3][0])
+        assert isinstance(preferences, dict)
+        assert "style" in preferences or "budget" in preferences
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    @patch("app.tools.memory._summarize_conversation")
+    def test_migrate_flush_called(self, mock_summarize, mock_embedding, mock_collection):
+        """验证插入后调用了 flush 确保数据持久化。"""
+        mock_summarize.return_value = "测试摘要"
+        mock_embedding.return_value = [0.1] * 3072
+        mock_coll = MagicMock()
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import migrate_to_long_term
+
+        migrate_to_long_term("user-001", "thread-001", self._make_messages(4))
+
+        mock_coll.flush.assert_called_once()
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    def test_recall_search_params(self, mock_embedding, mock_collection):
+        """验证 recall_long_term_memory 的搜索参数（metric_type, anns_field, output_fields）。"""
+        mock_embedding.return_value = [0.1] * 3072
+
+        mock_hit = MagicMock()
+        mock_hit.entity.get = lambda k, d="": {
+            "summary": "用户喜欢相机",
+            "preferences": '{"brand": "Sony"}',
+            "timestamp": int(time.time()),
+            "thread_id": "thread-001",
+        }.get(k, d)
+        mock_hit.score = 0.92
+
+        mock_coll = MagicMock()
+        mock_coll.search.return_value = [[mock_hit]]
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import recall_long_term_memory
+
+        results = recall_long_term_memory("user-001", query="相机推荐", top_k=3)
+
+        assert len(results) == 1
+        assert results[0]["summary"] == "用户喜欢相机"
+        assert results[0]["score"] == 0.92
+
+        search_call = mock_coll.search.call_args
+        assert search_call.kwargs.get("anns_field") == "embedding"
+        assert search_call.kwargs.get("limit") == 3
+        param = search_call.kwargs.get("param", {})
+        assert param["metric_type"] == "COSINE"
+
+        output_fields = search_call.kwargs.get("output_fields", [])
+        assert "summary" in output_fields
+        assert "preferences" in output_fields
+        assert "timestamp" in output_fields
+        assert "thread_id" in output_fields
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    def test_recall_user_filter_expression(self, mock_embedding, mock_collection):
+        """验证检索时使用 user_id 过滤表达式。"""
+        mock_embedding.return_value = [0.1] * 3072
+
+        mock_coll = MagicMock()
+        mock_coll.search.return_value = [[]]
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import recall_long_term_memory
+
+        recall_long_term_memory("user-test-123")
+
+        search_call = mock_coll.search.call_args
+        expr = search_call.kwargs.get("expr", "")
+        assert "user-test-123" in expr
+        assert "user_id" in expr
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    def test_recall_empty_user_id(self, mock_embedding, mock_collection):
+        """空 user_id 直接返回空列表，不执行检索。"""
+        from app.tools.memory import recall_long_term_memory
+
+        results = recall_long_term_memory("")
+        assert results == []
+        mock_embedding.assert_not_called()
+
+    @patch("app.tools.memory._ensure_memory_collection")
+    @patch("app.tools.memory._get_embedding")
+    def test_recall_embedding_failure(self, mock_embedding, mock_collection):
+        """Embedding 失败时返回空列表。"""
+        mock_embedding.side_effect = Exception("Embedding 服务不可用")
+        mock_coll = MagicMock()
+        mock_collection.return_value = mock_coll
+
+        from app.tools.memory import recall_long_term_memory
+
+        results = recall_long_term_memory("user-001", query="测试")
+        assert results == []
+
+    @patch("app.tools.memory.utility")
+    @patch("app.tools.memory.connections")
+    def test_collection_schema_structure(self, mock_connections, mock_utility):
+        """验证 _ensure_memory_collection 创建的 collection schema 字段完整性。"""
+        mock_utility.has_collection.return_value = False
+
+        with patch("app.tools.memory.Collection") as mock_coll_cls, \
+             patch("app.tools.memory.CollectionSchema") as mock_schema_cls:
+            mock_coll_instance = MagicMock()
+            mock_coll_cls.return_value = mock_coll_instance
+
+            from app.tools.memory import _ensure_memory_collection, _milvus_connected
+            import app.tools.memory as mem_module
+            mem_module._milvus_connected = True
+
+            _ensure_memory_collection()
+
+            schema_call = mock_schema_cls.call_args
+            fields = schema_call.kwargs.get("fields") or schema_call[0][0]
+
+            field_names = [f.name for f in fields]
+            assert "memory_id" in field_names
+            assert "user_id" in field_names
+            assert "thread_id" in field_names
+            assert "summary" in field_names
+            assert "preferences" in field_names
+            assert "timestamp" in field_names
+            assert "embedding" in field_names
+            assert len(fields) == 7
+
+    @patch("app.tools.memory.utility")
+    @patch("app.tools.memory.connections")
+    def test_collection_index_params(self, mock_connections, mock_utility):
+        """验证创建的索引参数（COSINE + IVF_FLAT）。"""
+        mock_utility.has_collection.return_value = False
+
+        with patch("app.tools.memory.Collection") as mock_coll_cls, \
+             patch("app.tools.memory.CollectionSchema"):
+            mock_coll_instance = MagicMock()
+            mock_coll_cls.return_value = mock_coll_instance
+
+            import app.tools.memory as mem_module
+            mem_module._milvus_connected = True
+
+            from app.tools.memory import _ensure_memory_collection
+            _ensure_memory_collection()
+
+            index_call = mock_coll_instance.create_index.call_args
+            assert index_call.kwargs.get("field_name") == "embedding"
+            index_params = index_call.kwargs.get("index_params", {})
+            assert index_params["metric_type"] == "COSINE"
+            assert index_params["index_type"] == "IVF_FLAT"
+
+
+# ════════════════════════════════════════════════════════════
+#  ToolCallAgent 工具路由测试
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestToolRouting:
+    """测试 ToolCallAgent 的工具路由机制。"""
+
+    def test_route_order_query(self):
+        """订单相关查询路由到 ORDER。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result = _route_to_tool("我的订单到哪了")
+        assert result.tool_type == ToolType.ORDER
+        assert result.confidence > 0
+
+    def test_route_logistics_query(self):
+        """物流相关查询路由到 LOGISTICS。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result = _route_to_tool("快递到哪了，什么时候配送")
+        assert result.tool_type == ToolType.LOGISTICS
+        assert result.confidence > 0
+
+    def test_route_return_query(self):
+        """退货相关查询路由到 RETURN。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result = _route_to_tool("我想退货退款")
+        assert result.tool_type == ToolType.RETURN
+        assert result.confidence > 0
+
+    def test_route_complaint_query(self):
+        """投诉相关查询路由到 COMPLAINT。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result = _route_to_tool("我要投诉这个商家")
+        assert result.tool_type == ToolType.COMPLAINT
+        assert result.confidence > 0
+
+    def test_route_empty_query(self):
+        """空查询返回 UNKNOWN。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result = _route_to_tool("")
+        assert result.tool_type == ToolType.UNKNOWN
+        assert result.confidence == 0.0
+
+    def test_route_no_keyword_match(self):
+        """无关键词匹配时默认降级到 ORDER。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result = _route_to_tool("今天天气怎么样")
+        assert result.tool_type == ToolType.ORDER
+        assert result.confidence == 0.3
+
+    def test_route_multiple_keywords(self):
+        """多个关键词匹配时置信度更高。"""
+        from app.agents.tool_call import _route_to_tool, ToolType
+
+        result_single = _route_to_tool("查订单")
+        result_multi = _route_to_tool("我的订单付款购买情况")
+        assert result_multi.confidence >= result_single.confidence
+
+
+# ════════════════════════════════════════════════════════════
+#  search.search_products 重试机制测试
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestSearchRetry:
+    """测试 search_products 的 ES 查询重试机制。"""
+
+    @patch("app.tools.search._get_embedding")
+    @patch("app.tools.search._get_es_client")
+    def test_retry_on_transient_failure(self, mock_es_factory, mock_embedding, mock_es):
+        """瞬时故障（ConnectionError）触发重试，第二次成功。"""
+        from elasticsearch import ConnectionError as ESConnectionError
+
+        mock_es_factory.return_value = mock_es
+        mock_embedding.return_value = [0.1] * 3072
+
+        mock_es.search.side_effect = [
+            ESConnectionError("connection refused"),
+            {
+                "hits": {
+                    "total": {"value": 1},
+                    "hits": [{
+                        "_id": "prod-retry",
+                        "_score": 5.0,
+                        "_source": {
+                            "product_id": "prod-retry",
+                            "name": "重试成功商品",
+                            "category": "测试",
+                            "brand": "Test",
+                            "price": 100,
+                            "tags": [],
+                            "description": "重试后返回",
+                        },
+                    }],
+                },
+            },
+        ]
+
+        from app.tools.search import search_products, es_circuit_breaker
+        es_circuit_breaker.record_success()
+
+        results = search_products("测试重试", use_vector=False)
+
+        assert len(results) == 1
+        assert results[0]["product_id"] == "prod-retry"
+        assert mock_es.search.call_count == 2
+
+    @patch("app.tools.search._get_embedding")
+    @patch("app.tools.search._get_es_client")
+    def test_no_retry_on_non_transient_failure(self, mock_es_factory, mock_embedding, mock_es):
+        """非瞬时故障（如 400 参数错误）不重试，直接返回空。"""
+        mock_es_factory.return_value = mock_es
+        mock_embedding.return_value = [0.1] * 3072
+
+        mock_es.search.side_effect = ValueError("invalid query body")
+
+        from app.tools.search import search_products, es_circuit_breaker
+        es_circuit_breaker.record_success()
+
+        results = search_products("测试非瞬时", use_vector=False)
+
+        assert results == []
+        assert mock_es.search.call_count == 1
