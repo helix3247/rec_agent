@@ -1,6 +1,7 @@
 """
 app/tools/search.py
 商品检索工具 —— 封装 Elasticsearch Hybrid Search（关键词 + KNN 向量）与结构化过滤。
+集成可靠性机制：超时控制、熔断保护、重试。
 """
 
 import time
@@ -11,6 +12,10 @@ from elasticsearch import Elasticsearch
 
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.reliability import (
+    es_circuit_breaker,
+    retry_with_backoff,
+)
 
 _logger = get_logger(agent_name="SearchTool")
 
@@ -127,12 +132,18 @@ def search_products(
         except Exception as e:
             _logger.warning("向量检索 Embedding 失败，仅使用关键词检索 | error={}", str(e))
 
+    if not es_circuit_breaker.allow_request():
+        _logger.warning("ES 熔断器开启，跳过检索")
+        return []
+
     try:
         t0 = time.time()
-        resp = es.search(index=index_name, body=body)
+        resp = es.search(index=index_name, body=body, request_timeout=15)
         elapsed = round((time.time() - t0) * 1000)
+        es_circuit_breaker.record_success()
         _logger.info("ES 检索完成 | hits={} | took={}ms", resp["hits"]["total"]["value"], elapsed)
     except Exception as e:
+        es_circuit_breaker.record_failure()
         _logger.error("ES 检索失败 | error={}", str(e))
         return []
 

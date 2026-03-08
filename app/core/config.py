@@ -22,7 +22,7 @@ class LLMSettings(BaseSettings):
     # 主模型 (DeepSeek)
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "gemini-2.5-flash-lite"
 
     # 备用模型 (OpenAI)
     fallback_llm_api_key: str = ""

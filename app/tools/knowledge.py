@@ -1,6 +1,7 @@
 """
 app/tools/knowledge.py
 知识库检索工具 —— 封装 Milvus 向量检索逻辑，支持按 product_id 和 doc_type 过滤。
+集成可靠性机制：熔断保护。
 """
 
 from typing import Optional
@@ -10,6 +11,7 @@ from pymilvus import Collection, connections
 
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.reliability import milvus_circuit_breaker
 
 _logger = get_logger(agent_name="KnowledgeTool")
 
@@ -90,6 +92,10 @@ def query_knowledge(
         "params": {"nprobe": 16},
     }
 
+    if not milvus_circuit_breaker.allow_request():
+        _logger.warning("Milvus 熔断器开启，跳过检索")
+        return []
+
     try:
         results = collection.search(
             data=[query_vector],
@@ -98,9 +104,12 @@ def query_knowledge(
             limit=top_k,
             expr=expr or None,
             output_fields=["product_id", "doc_type", "text"],
+            timeout=15,
         )
+        milvus_circuit_breaker.record_success()
         _logger.info("Milvus 检索完成 | hits={} | expr={}", len(results[0]), expr or "无")
     except Exception as e:
+        milvus_circuit_breaker.record_failure()
         _logger.error("Milvus 检索失败 | error={}", str(e))
         return []
 

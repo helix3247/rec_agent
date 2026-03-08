@@ -2,9 +2,11 @@
 app/agents/outfit.py
 OutfitAgent —— 穿搭/组合推荐。
 将跨品类需求拆解为多次检索并整合，生成全身搭配方案。
+支持并发检索：多品类同时检索，限制最大并发数。
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_core.messages import AIMessage, SystemMessage
 
@@ -118,9 +120,11 @@ def outfit_node(state: AgentState) -> dict:
     relax_price = retry_count >= 1
     effective_price = None if relax_price else price_per_cat
 
-    # ── 多品类检索 ──
-    category_results: dict[str, list[dict]] = {}
-    for cat in _OUTFIT_CATEGORIES:
+    # ── 多品类并发检索 ──
+    _MAX_CONCURRENT_SEARCHES = 4
+
+    def _search_single_category(cat: str) -> tuple[str, list[dict]]:
+        """单个品类的检索逻辑（含自动放宽）。"""
         search_query = f"{scenario} {style} {cat}".strip() or cat
         try:
             products = search_products(
@@ -130,7 +134,6 @@ def outfit_node(state: AgentState) -> dict:
                 tags=scenario_tags or None,
                 top_k=5,
             )
-            # 如果标签过滤结果太少，放宽条件重试
             if len(products) < 3:
                 products = search_products(
                     query=search_query,
@@ -138,18 +141,32 @@ def outfit_node(state: AgentState) -> dict:
                     max_price=effective_price,
                     top_k=5,
                 )
-            # 仍不足则完全放开
             if len(products) < 2:
                 products = search_products(
                     query=cat,
                     top_k=5,
                 )
             products = rerank_by_user_profile(products, user_profile)
-            category_results[cat] = products
-            log.info("品类 {} 检索返回 {} 个商品", cat, len(products))
+            return cat, products
         except Exception as e:
             log.error("品类 {} 检索失败 | error={}", cat, str(e))
-            category_results[cat] = []
+            return cat, []
+
+    category_results: dict[str, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_SEARCHES) as executor:
+        futures = {
+            executor.submit(_search_single_category, cat): cat
+            for cat in _OUTFIT_CATEGORIES
+        }
+        for future in as_completed(futures):
+            cat_name = futures[future]
+            try:
+                cat, products = future.result(timeout=30)
+                category_results[cat] = products
+                log.info("品类 {} 检索返回 {} 个商品", cat, len(products))
+            except Exception as e:
+                log.error("品类 {} 并发检索异常 | error={}", cat_name, str(e))
+                category_results[cat_name] = []
 
     # ── LLM 生成穿搭方案 ──
     category_products_text = _format_category_products(category_results)

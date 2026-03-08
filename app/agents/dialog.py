@@ -2,11 +2,13 @@
 app/agents/dialog.py
 DialogFlowAgent —— 多轮对话管理。
 - 基于 Redis 维护会话级短期记忆（按 thread_id 存取对话历史）。
+- 支持长期记忆迁移：会话结束时将对话摘要写入 Milvus，新会话加载历史偏好。
 - 澄清式对话：当关键槽位缺失时生成追问。
 - 闲聊兜底：处理 chat 意图的一般性对话。
 """
 
 import json
+import threading
 
 import redis
 from langchain_core.messages import (
@@ -22,9 +24,16 @@ from app.core.config import settings
 from app.core.llm import get_llm
 from app.core.logger import get_logger
 from app.prompts.dialog import CLARIFY_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT
+from app.tools.memory import (
+    migrate_to_long_term,
+    recall_long_term_memory,
+    format_memory_context,
+)
 
 _HISTORY_TTL = 1800  # 会话历史 Redis TTL: 30 分钟
 _MAX_HISTORY = 20    # 最多保留的消息条数
+_MIGRATION_TTL_THRESHOLD = 300  # TTL 低于此值时触发迁移 (5 分钟)
+_logger = get_logger(agent_name="DialogFlow")
 
 
 def _get_redis_client() -> redis.Redis:
@@ -97,6 +106,81 @@ def save_slots(thread_id: str, slots: dict) -> None:
         pass
 
 
+def check_and_migrate_memory(thread_id: str, user_id: str) -> None:
+    """
+    检查 Redis 中会话 TTL，若即将过期则触发记忆迁移到 Milvus。
+    在后台线程中执行，不阻塞主流程。
+    """
+    if not thread_id or not user_id:
+        return
+
+    try:
+        r = _get_redis_client()
+        ttl = r.ttl(_history_key(thread_id))
+        if 0 < ttl < _MIGRATION_TTL_THRESHOLD:
+            messages = load_history(thread_id)
+            if messages:
+                _logger.info(
+                    "会话 TTL 即将过期，触发记忆迁移 | thread_id={} | ttl={}s",
+                    thread_id, ttl,
+                )
+                t = threading.Thread(
+                    target=migrate_to_long_term,
+                    args=(user_id, thread_id, messages),
+                    daemon=True,
+                )
+                t.start()
+    except Exception:
+        pass
+
+
+def end_session_and_migrate(thread_id: str, user_id: str) -> bool:
+    """
+    显式结束会话，将对话迁移到长期记忆后清理 Redis。
+
+    Returns:
+        是否迁移成功。
+    """
+    if not thread_id or not user_id:
+        return False
+
+    log = get_logger(agent_name="DialogFlow")
+    messages = load_history(thread_id)
+    if not messages:
+        return False
+
+    success = migrate_to_long_term(user_id, thread_id, messages)
+
+    if success:
+        try:
+            r = _get_redis_client()
+            r.delete(_history_key(thread_id))
+            r.delete(_slots_key(thread_id))
+            log.info("会话结束并迁移完成 | thread_id={}", thread_id)
+        except Exception:
+            pass
+
+    return success
+
+
+def load_long_term_context(user_id: str, query: str = "") -> str:
+    """
+    加载用户的长期记忆上下文，用于注入新会话的 Prompt。
+
+    Args:
+        user_id: 用户 ID。
+        query: 当前查询（用于语义相关性检索）。
+
+    Returns:
+        格式化的长期记忆上下文文本，可直接拼入 System Prompt。
+    """
+    if not user_id:
+        return ""
+
+    memories = recall_long_term_memory(user_id, query=query, top_k=3)
+    return format_memory_context(memories)
+
+
 def _find_missing_slots(intent: str, slots: dict) -> list[str]:
     """根据意图判断哪些关键槽位缺失。"""
     required_map = {
@@ -141,6 +225,10 @@ def dialog_node(state: AgentState) -> dict:
     # 将包含本轮回复的完整对话保存到 Redis
     save_history(thread_id, messages + [AIMessage(content=reply)])
     save_slots(thread_id, merged_slots)
+
+    # 异步检查是否需要迁移记忆到 Milvus（TTL 即将过期时触发）
+    user_id = state.get("user_id", "")
+    check_and_migrate_memory(thread_id, user_id)
 
     log.info("DialogFlow 完成 | status={}", task_status)
     return {
