@@ -120,6 +120,21 @@ class RedisSettings(BaseSettings):
     redis_password: str = ""
 
 
+class LangfuseSettings(BaseSettings):
+    """Langfuse 可观测性平台配置"""
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    langfuse_enabled: bool = False
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://localhost:3000"
+
+
 class Settings(BaseSettings):
     """聚合所有子配置的全局配置"""
 
@@ -132,6 +147,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     langsmith: LangSmithSettings = LangSmithSettings()
+    langfuse: LangfuseSettings = LangfuseSettings()
     mysql: MySQLSettings = MySQLSettings()
     es: ESSettings = ESSettings()
     milvus: MilvusSettings = MilvusSettings()

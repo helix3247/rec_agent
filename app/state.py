@@ -29,6 +29,18 @@ class PlanStep(TypedDict, total=False):
     result: str
 
 
+class NodeMetrics(TypedDict, total=False):
+    """单个节点的执行指标。"""
+    node_name: str
+    start_time: float
+    end_time: float
+    latency_ms: float
+    token_usage: dict[str, int]
+    tool_calls: list[dict[str, Any]]
+    success: bool
+    error: str
+
+
 class AgentState(TypedDict, total=False):
     """
     LangGraph 全局状态。
@@ -51,6 +63,9 @@ class AgentState(TypedDict, total=False):
         plan_steps          : Planner 拆解出的子任务步骤列表。
         plan_current_step   : Planner 当前执行到的步骤索引。
         plan_results        : 各子任务执行结果的汇总。
+        _request_start_time : 请求开始时间戳（秒），用于计算总耗时。
+        _node_metrics       : 各节点执行指标列表，由 MonitorAgent 汇总输出。
+        _agent_route_path   : Agent 路由路径记录（有序节点名列表）。
     """
     messages: Annotated[list[BaseMessage], add_messages]
     user_intent: str
@@ -69,3 +84,6 @@ class AgentState(TypedDict, total=False):
     plan_steps: list[PlanStep]
     plan_current_step: int
     plan_results: list[dict[str, Any]]
+    _request_start_time: float
+    _node_metrics: list[NodeMetrics]
+    _agent_route_path: list[str]
