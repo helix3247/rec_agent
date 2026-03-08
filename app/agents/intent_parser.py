@@ -10,7 +10,7 @@ import json
 from langchain_core.messages import SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm
+from app.core.llm import get_llm, invoke_with_smart_routing_sync, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage, merge_token_usage
 from app.models.intent import IntentResult
@@ -65,8 +65,14 @@ def intent_parser_node(state: AgentState) -> dict:
     node_success = True
     node_error = ""
 
+    router = get_model_router()
+    complexity = router.classify_complexity(agent_name="IntentParser")
+    model_type = router.select_model(complexity)
+    fallback_type = "fallback" if model_type == "primary" else "primary"
+    log.info("智能路由 | complexity={} | model={}", complexity.value, model_type)
+
     try:
-        llm = get_llm("primary")
+        llm = get_llm(model_type)
         result, token_usage = _invoke_structured(llm, prompt_messages, log)
         log.info("意图识别完成 | intent={} | slots={}", result.intent, {
             "budget": result.budget,
@@ -76,11 +82,11 @@ def intent_parser_node(state: AgentState) -> dict:
             "must_have": result.must_have,
         })
     except Exception as e:
-        log.warning("主模型意图识别失败，使用 fallback 重试 | error={}", str(e))
+        log.warning("首选模型意图识别失败，降级重试 | error={}", str(e))
         try:
-            fallback_llm = get_llm("fallback")
+            fallback_llm = get_llm(fallback_type)
             result, token_usage = _invoke_structured(fallback_llm, prompt_messages, log)
-            log.info("Fallback 意图识别完成 | intent={}", result.intent)
+            log.info("降级模型意图识别完成 | intent={} | model={}", result.intent, fallback_type)
         except Exception as fallback_err:
             log.error("意图识别彻底失败，回退到 chat 意图 | error={}", str(fallback_err))
             result = IntentResult(intent="chat")

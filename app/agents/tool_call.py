@@ -7,7 +7,7 @@ ToolCallAgent —— 通用工具执行器。
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm
+from app.core.llm import get_llm, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.tools.db import query_order_status
@@ -74,15 +74,21 @@ def tool_call_node(state: AgentState) -> dict:
 
     node_success = True
     node_error = ""
+    router = get_model_router()
+    complexity = router.classify_complexity(agent_name="ToolCallAgent")
+    preferred = router.select_model(complexity)
+    fallback_type = "fallback" if preferred == "primary" else "primary"
+    log.info("智能路由 | complexity={} | model={}", complexity.value, preferred)
+
     try:
-        llm = get_llm("primary")
+        llm = get_llm(preferred)
         response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
         reply = response.content
         token_usage = extract_token_usage(response)
     except Exception as e:
-        log.warning("主模型调用失败，使用 fallback | error={}", str(e))
+        log.warning("首选模型调用失败，降级使用 {} | error={}", fallback_type, str(e))
         try:
-            llm = get_llm("fallback")
+            llm = get_llm(fallback_type)
             response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
             reply = response.content
             token_usage = extract_token_usage(response)

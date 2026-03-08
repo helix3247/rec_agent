@@ -18,7 +18,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm, invoke_with_fallback_sync
+from app.core.llm import get_llm, invoke_with_smart_routing_sync, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_INTEGRATE_PROMPT
@@ -61,22 +61,17 @@ def _generate_plan(query: str, slots: dict, log) -> dict:
     )
 
     try:
-        llm = get_llm("primary", temperature=0.3)
-        result = llm.invoke([SystemMessage(content=system_prompt)])
-        plan = _extract_json(result.content)
+        plan_text = invoke_with_smart_routing_sync(
+            [SystemMessage(content=system_prompt)],
+            agent_name="PlannerAgent",
+            temperature=0.3,
+        )
+        plan = _extract_json(plan_text)
         log.info("任务规划生成成功 | steps_count={}", len(plan.get("steps", [])))
         return plan
     except Exception as e:
-        log.warning("主模型规划失败，尝试 fallback | error={}", str(e))
-        try:
-            plan_text = invoke_with_fallback_sync(
-                [SystemMessage(content=system_prompt)],
-                temperature=0.3,
-            )
-            return _extract_json(plan_text)
-        except Exception as fallback_err:
-            log.error("任务规划彻底失败 | error={}", str(fallback_err))
-            return {"plan_summary": "规划失败", "steps": []}
+        log.error("任务规划彻底失败 | error={}", str(e))
+        return {"plan_summary": "规划失败", "steps": []}
 
 
 def _integrate_results(
@@ -105,8 +100,9 @@ def _integrate_results(
     )
 
     try:
-        return invoke_with_fallback_sync(
+        return invoke_with_smart_routing_sync(
             [SystemMessage(content=prompt)],
+            agent_name="PlannerAgent",
             temperature=0.5,
         )
     except Exception as e:

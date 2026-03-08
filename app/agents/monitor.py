@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from app.state import AgentState
+from app.core.llm import get_model_router
 from app.core.logger import get_logger
 from app.core.langfuse_integration import report_trace_metrics
 
@@ -101,6 +102,10 @@ def monitor_node(state: AgentState) -> dict:
     tool_stats = _calc_tool_call_stats(node_metrics)
     node_breakdown = _build_node_latency_breakdown(node_metrics)
 
+    # 汇总模型路由健康状态
+    router = get_model_router()
+    model_routing = router.get_health_report()
+
     trace_report = {
         "trace_id": trace_id,
         "thread_id": state.get("thread_id", "-"),
@@ -116,6 +121,7 @@ def monitor_node(state: AgentState) -> dict:
             "failed": tool_stats["failed"],
             "success_rate": tool_stats["success_rate"],
         },
+        "model_routing": model_routing,
         "node_latency_breakdown": node_breakdown,
     }
 
@@ -126,6 +132,19 @@ def monitor_node(state: AgentState) -> dict:
             log.warning(
                 "工具调用失败 | node={} | tool={} | error={}",
                 f["node"], f["tool"], f["error"],
+            )
+
+    # 检查模型健康状态，对频繁降级到 fallback 的情况打 warning
+    for model_name, metrics in model_routing.items():
+        if not metrics.get("healthy", True):
+            log.warning(
+                "模型不健康 | model={} | error_rate={} | consecutive_failures={}",
+                model_name, metrics.get("error_rate", 0), metrics.get("consecutive_failures", 0),
+            )
+        if metrics.get("error_rate", 0) > 0.3:
+            log.warning(
+                "模型降级频繁 | model={} | error_rate={:.2%} | total_calls={}",
+                model_name, metrics["error_rate"], metrics.get("total_calls", 0),
             )
 
     slow_nodes = [n for n in node_breakdown if n["latency_ms"] > 5000]

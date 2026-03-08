@@ -21,7 +21,7 @@ from langchain_core.messages import (
 
 from app.state import AgentState
 from app.core.config import settings
-from app.core.llm import get_llm
+from app.core.llm import get_llm, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.dialog import CLARIFY_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT
@@ -271,14 +271,20 @@ def _generate_clarification(
         missing_slots=missing_str,
     )
 
+    router = get_model_router()
+    complexity = router.classify_complexity(agent_name="DialogFlow")
+    preferred = router.select_model(complexity)
+    fallback_type = "fallback" if preferred == "primary" else "primary"
+    log.info("智能路由 | complexity={} | model={}", complexity.value, preferred)
+
     try:
-        llm = get_llm("primary")
+        llm = get_llm(preferred)
         response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
         return response.content, extract_token_usage(response)
     except Exception as e:
-        log.warning("澄清式对话 LLM 调用失败，使用 fallback | error={}", str(e))
+        log.warning("首选模型调用失败，降级使用 {} | error={}", fallback_type, str(e))
         try:
-            llm = get_llm("fallback")
+            llm = get_llm(fallback_type)
             response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
             return response.content, extract_token_usage(response)
         except Exception:
@@ -287,14 +293,19 @@ def _generate_clarification(
 
 def _generate_chat_reply(messages: list[BaseMessage], log) -> tuple[str, dict[str, int]]:
     """调用 LLM 生成闲聊回复。返回 (回复文本, token_usage)。"""
+    router = get_model_router()
+    complexity = router.classify_complexity(agent_name="DialogFlow")
+    preferred = router.select_model(complexity)
+    fallback_type = "fallback" if preferred == "primary" else "primary"
+
     try:
-        llm = get_llm("primary")
+        llm = get_llm(preferred)
         response = llm.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages)
         return response.content, extract_token_usage(response)
     except Exception as e:
-        log.warning("闲聊 LLM 调用失败，使用 fallback | error={}", str(e))
+        log.warning("首选模型调用失败，降级使用 {} | error={}", fallback_type, str(e))
         try:
-            llm = get_llm("fallback")
+            llm = get_llm(fallback_type)
             response = llm.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages)
             return response.content, extract_token_usage(response)
         except Exception:

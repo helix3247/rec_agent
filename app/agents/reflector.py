@@ -14,7 +14,7 @@ import re
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm, invoke_with_fallback_sync
+from app.core.llm import get_llm, invoke_with_smart_routing_sync, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.reflector import REFLECTOR_SYSTEM_PROMPT, REFLECTOR_BUDGET_ADVICE_PROMPT
@@ -85,8 +85,9 @@ def _generate_budget_advice(
     )
 
     try:
-        return invoke_with_fallback_sync(
+        return invoke_with_smart_routing_sync(
             [SystemMessage(content=prompt)],
+            agent_name="Reflector",
             temperature=0.5,
         )
     except Exception as e:
@@ -147,7 +148,11 @@ def reflector_node(state: AgentState) -> dict:
         )
 
         try:
-            llm = get_llm("primary", temperature=0.1)
+            router = get_model_router()
+            complexity = router.classify_complexity(agent_name="Reflector")
+            model_type = router.select_model(complexity)
+            log.info("智能路由 | complexity={} | model={}", complexity.value, model_type)
+            llm = get_llm(model_type, temperature=0.1)
             llm_result = llm.invoke([SystemMessage(content=system_prompt)])
             token_usage = extract_token_usage(llm_result)
             reflection = _extract_json(llm_result.content)

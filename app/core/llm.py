@@ -2,10 +2,12 @@
 app/core/llm.py
 LLM 客户端工厂。
 支持 "primary" (DeepSeek) 和 "fallback" (OpenAI) 两种模型，
-调用层自动降级：主模型失败时切换到 fallback。
+通过 SmartModelRouter 进行智能路由与自动降级。
 
-升级版:
-    - 集成 FallbackAgent 智能路由器的调用指标记录
+能力:
+    - 按任务复杂度（LIGHT/MEDIUM/HEAVY）智能选择模型
+    - 记录模型健康指标（失败率、延迟、连续失败）
+    - 主模型不健康时自动降级至备用模型
     - 支持超时控制参数
 """
 
@@ -13,6 +15,7 @@ import time
 from typing import Literal
 
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage
 
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -22,6 +25,18 @@ _logger = get_logger(agent_name="LLMClient")
 ModelType = Literal["primary", "fallback"]
 
 _DEFAULT_TIMEOUT = 60  # LLM 调用默认超时（秒）
+
+# SmartModelRouter 全局单例（延迟导入避免循环引用）
+_model_router = None
+
+
+def get_model_router():
+    """获取全局 SmartModelRouter 单例（复用 fallback.py 中的实例）。"""
+    global _model_router
+    if _model_router is None:
+        from app.agents.fallback import model_router
+        _model_router = model_router
+    return _model_router
 
 
 def get_llm(model_type: ModelType = "primary", **kwargs) -> ChatOpenAI:
@@ -57,10 +72,61 @@ def get_llm(model_type: ModelType = "primary", **kwargs) -> ChatOpenAI:
 def _record_to_router(model_type: str, success: bool, latency_ms: float):
     """将调用结果同步到智能路由器的健康指标。"""
     try:
-        from app.agents.fallback import model_router
-        model_router.record_call(model_type, success, latency_ms)
+        router = get_model_router()
+        router.record_call(model_type, success, latency_ms)
     except Exception:
         pass
+
+
+async def invoke_with_smart_routing(
+    messages: list[BaseMessage],
+    agent_name: str = "",
+    intent: str = "",
+    message_count: int = 0,
+    **kwargs,
+) -> str:
+    """
+    带智能路由和降级的 LLM 异步调用。
+
+    根据 agent_name / intent 自动判断任务复杂度，选择合适的模型，
+    首选模型失败后自动降级到另一个模型。
+
+    Args:
+        messages: LangChain 消息列表。
+        agent_name: 调用方 Agent 名称（用于复杂度判定）。
+        intent: 用户意图（用于复杂度判定）。
+        message_count: 当前对话消息数（长对话会提升复杂度）。
+        **kwargs: 传递给 ChatOpenAI 的额外参数。
+
+    Returns:
+        LLM 生成的文本内容。
+    """
+    router = get_model_router()
+    return await router.invoke_with_smart_routing(
+        messages,
+        intent=intent,
+        agent_name=agent_name,
+        message_count=message_count,
+        **kwargs,
+    )
+
+
+def invoke_with_smart_routing_sync(
+    messages: list[BaseMessage],
+    agent_name: str = "",
+    intent: str = "",
+    message_count: int = 0,
+    **kwargs,
+) -> str:
+    """同步版本的智能路由 LLM 调用。"""
+    router = get_model_router()
+    return router.invoke_with_smart_routing_sync(
+        messages,
+        intent=intent,
+        agent_name=agent_name,
+        message_count=message_count,
+        **kwargs,
+    )
 
 
 async def invoke_with_fallback(messages: list, **kwargs) -> str:

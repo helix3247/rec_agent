@@ -303,5 +303,5 @@ class SmartModelRouter:
         return report
 
 
-# 全局单例路由器
+# 全局单例路由器（保留向后兼容，推荐通过 app.core.llm.get_model_router() 获取）
 model_router = SmartModelRouter()

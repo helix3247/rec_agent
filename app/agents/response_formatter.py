@@ -8,7 +8,7 @@ import re
 from langchain_core.messages import SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm
+from app.core.llm import get_llm, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage, merge_token_usage
 from app.prompts.response_formatter import FORMATTER_SYSTEM_PROMPT, SUGGESTED_QUESTIONS_PROMPT
@@ -69,8 +69,13 @@ def _polish_response(
         candidates_count=len(candidates),
     )
 
+    router = get_model_router()
+    complexity = router.classify_complexity(agent_name="ResponseFormatter")
+    preferred = router.select_model(complexity)
+    log.info("智能路由 | complexity={} | model={}", complexity.value, preferred)
+
     try:
-        llm = get_llm("primary", temperature=0.3)
+        llm = get_llm(preferred, temperature=0.3)
         response = llm.invoke([
             SystemMessage(content=system_prompt),
             SystemMessage(content=f"请润色以下回答：\n\n{raw_response}"),
@@ -113,8 +118,12 @@ def _generate_suggested_questions(
         candidates_summary=candidates_summary,
     )
 
+    router = get_model_router()
+    complexity = router.classify_complexity(agent_name="ResponseFormatter")
+    preferred = router.select_model(complexity)
+
     try:
-        llm = get_llm("primary", temperature=0.7)
+        llm = get_llm(preferred, temperature=0.7)
         result = llm.invoke([SystemMessage(content=system_prompt)])
         usage = extract_token_usage(result)
         questions = _parse_questions(result.content)
