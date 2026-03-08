@@ -150,7 +150,7 @@ def search_products(
         retryable_exceptions=_TRANSIENT_ES_EXCEPTIONS,
     )
     def _do_es_search():
-        return es.search(index=index_name, body=body, request_timeout=15)
+        return es.search(index=index_name, body=body, timeout="15s")
 
     try:
         t0 = time.time()
