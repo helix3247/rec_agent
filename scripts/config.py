@@ -45,7 +45,7 @@ MYSQL_CONFIG = {
     "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
     "port": int(os.getenv("MYSQL_PORT", 3306)),
     "user": os.getenv("MYSQL_USER", "root"),
-    "password": os.getenv("MYSQL_PASSWORD", "root123"),
+    "password": os.getenv("MYSQL_PASSWORD", ""),
     "database": os.getenv("MYSQL_DATABASE", "rec_agent"),
     "charset": "utf8mb4",
 }
@@ -80,8 +80,8 @@ MILVUS_CONFIG = {
 # ─────────────────────────── Embedding API 配置 ───────────────────────────
 EMBEDDING_CONFIG = {
     "provider": os.getenv("EMBEDDING_PROVIDER", "openai"),
-    "api_key": os.getenv("API_KEY", ""),
-    "base_url": os.getenv("BASE_URL", "https://api.openai.com/v1"),
+    "api_key": os.getenv("EMBEDDING_API_KEY", ""),
+    "base_url": os.getenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1"),
     "model": os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
     "request_interval": float(os.getenv("EMBEDDING_REQUEST_INTERVAL", 0.1)),
     "batch_size": int(os.getenv("EMBEDDING_BATCH_SIZE", 32)),

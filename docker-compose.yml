@@ -1,5 +1,9 @@
 version: "3.8"
 
+# ⚠️ 安全提示：
+# 本文件中所有密码均使用环境变量引用 ${VAR:-默认值} 形式。
+# 默认值仅供本地开发使用，生产部署前必须通过 .env 文件或环境变量覆盖所有密码。
+
 services:
   # ─────────────────── MySQL 8.0 ───────────────────
   mysql:
@@ -7,8 +11,8 @@ services:
     container_name: rec-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: 123456
-      MYSQL_DATABASE: rec_agent
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-changeme}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-rec_agent}
       MYSQL_CHARSET: utf8mb4
     ports:
       - "23306:3306"
@@ -51,7 +55,7 @@ services:
         exec /usr/local/bin/docker-entrypoint.sh
     environment:
       - discovery.type=single-node
-      - ELASTIC_PASSWORD=AuM_JuNzR3kzOW=vkNYA
+      - ELASTIC_PASSWORD=${ES_PASSWORD:-changeme}
       - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=false
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
@@ -60,7 +64,7 @@ services:
     volumes:
       - ./volumes/elasticsearch:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -u elastic:AuM_JuNzR3kzOW=vkNYA http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -u elastic:$$ELASTIC_PASSWORD -f http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -161,8 +165,8 @@ services:
       LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: ${LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE:-true}
       LANGFUSE_INGESTION_QUEUE_DELAY_MS: ${LANGFUSE_INGESTION_QUEUE_DELAY_MS:-}
       LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: ${LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS:-}
-      REDIS_HOST: ${REDIS_HOST:-langfuse-redis}
-      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
       REDIS_AUTH: ${REDIS_AUTH:-myredissecret}
       REDIS_TLS_ENABLED: ${REDIS_TLS_ENABLED:-false}
       REDIS_TLS_CA: ${REDIS_TLS_CA:-/certs/ca.crt}

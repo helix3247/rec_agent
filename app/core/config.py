@@ -115,7 +115,7 @@ class MySQLSettings(BaseSettings):
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
     mysql_user: str = "root"
-    mysql_password: str = "root123"
+    mysql_password: str = ""
     mysql_database: str = "rec_agent"
 
     @model_validator(mode="after")
