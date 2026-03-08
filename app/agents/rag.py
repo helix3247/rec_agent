@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.state import AgentState
 from app.core.llm import get_llm
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.tools.knowledge import query_knowledge
 from app.tools.db import get_product_by_id, list_favorites
 from app.prompts.rag import RAG_SYSTEM_PROMPT
@@ -41,6 +42,7 @@ def _format_product_info(product: dict | None) -> str:
 
 def rag_node(state: AgentState) -> dict:
     """RAGAgent 节点：检索知识库 -> 上下文注入 -> LLM 生成回答。"""
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     user_id = state.get("user_id", "")
     selected_product_id = state.get("selected_product_id", "")
@@ -49,24 +51,25 @@ def rag_node(state: AgentState) -> dict:
 
     log.info("RAG 问答开始 | selected_product_id={}", selected_product_id)
 
-    # 获取用户查询
     query = ""
     for msg in reversed(messages):
         if hasattr(msg, "type") and msg.type == "human":
             query = msg.content
             break
 
-    # ── 1. 确定目标商品 ──
+    tool_calls_log: list[dict] = []
+    token_usage: dict[str, int] = {}
     product_info = None
     target_product_id = selected_product_id
 
     if target_product_id:
         product_info = get_product_by_id(target_product_id)
+        tool_calls_log.append({"tool_name": "get_product_by_id", "success": product_info is not None})
         log.info("使用指定商品 | product_id={}", target_product_id)
     else:
-        # 无 selected_product_id 时，尝试从收藏夹引导
         if user_id:
             favorites = list_favorites(user_id, limit=5)
+            tool_calls_log.append({"tool_name": "list_favorites", "success": True})
             if favorites:
                 log.info("无指定商品，引导用户从收藏夹选择 | favorites_count={}", len(favorites))
                 fav_text = "\n".join(
@@ -78,37 +81,42 @@ def rag_node(state: AgentState) -> dict:
                     f"您可以告诉我想了解哪一个：\n\n{fav_text}\n\n"
                     f"您也可以直接描述您想了解的商品。"
                 )
-                return {
+                node_result = {
                     "current_agent": "RAGAgent",
                     "response": reply,
                     "messages": [AIMessage(content=reply)],
                     "task_status": "clarifying",
                 }
+                metrics = record_node_metrics(
+                    state, "RAGAgent", t0, tool_calls=tool_calls_log,
+                )
+                return {**node_result, **metrics}
 
-    # ── 2. 检索知识库 ──
     try:
         chunks = query_knowledge(
-            query=query,
-            product_id=target_product_id or None,
-            top_k=5,
+            query=query, product_id=target_product_id or None, top_k=5,
         )
         log.info("知识库检索返回 {} 个 chunk", len(chunks))
+        tool_calls_log.append({"tool_name": "query_knowledge", "success": True})
     except Exception as e:
         log.error("知识库检索失败 | error={}", str(e))
         chunks = []
+        tool_calls_log.append({"tool_name": "query_knowledge", "success": False, "error": str(e)})
 
-    # ── 3. LLM 生成回答 ──
     system_prompt = RAG_SYSTEM_PROMPT.format(
         query=query,
         product_info=_format_product_info(product_info),
         knowledge_chunks=_format_chunks(chunks),
     )
 
+    node_success = True
+    node_error = ""
     try:
         llm = get_llm("primary")
         llm_messages = [SystemMessage(content=system_prompt)] + messages
         response = llm.invoke(llm_messages)
         reply = response.content
+        token_usage = extract_token_usage(response)
     except Exception as e:
         log.warning("主模型调用失败，使用 fallback | error={}", str(e))
         try:
@@ -116,16 +124,25 @@ def rag_node(state: AgentState) -> dict:
             llm_messages = [SystemMessage(content=system_prompt)] + messages
             response = llm.invoke(llm_messages)
             reply = response.content
-        except Exception:
+            token_usage = extract_token_usage(response)
+        except Exception as fe:
             if chunks:
                 reply = "根据相关评价：" + chunks[0].get("text", "暂无详细信息。")
             else:
                 reply = "抱歉，暂时没有找到该商品的相关信息。您可以尝试提供更具体的商品名称。"
+            node_success = False
+            node_error = str(fe)
 
     log.info("RAG 问答完成")
-    return {
+    node_result = {
         "current_agent": "RAGAgent",
         "response": reply,
         "messages": [AIMessage(content=reply)],
         "task_status": "completed",
     }
+    metrics = record_node_metrics(
+        state, "RAGAgent", t0,
+        token_usage=token_usage, tool_calls=tool_calls_log,
+        success=node_success, error=node_error,
+    )
+    return {**node_result, **metrics}

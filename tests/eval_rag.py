@@ -106,11 +106,23 @@ def _generate_rag_responses():
             sample["response"] = "抱歉，无法生成回答。"
 
 
+def _get_evaluator_llm():
+    """获取评测用的 LLM，兼容 DeepSeek 等不支持 n>1 的 API。"""
+    from app.core.llm import get_llm
+    from ragas.llms import LangchainLLMWrapper
+
+    llm = get_llm("primary")
+    return LangchainLLMWrapper(llm)
+
+
 def _run_ragas_evaluation():
     """使用 Ragas 进行 Faithfulness 和 Answer Relevance 评测。"""
     try:
         from ragas import SingleTurnSample, EvaluationDataset, evaluate
-        from ragas.metrics import Faithfulness, ResponseRelevancy
+        try:
+            from ragas.metrics.collections import Faithfulness, ResponseRelevancy
+        except ImportError:
+            from ragas.metrics import Faithfulness, ResponseRelevancy
     except ImportError:
         _log.error("ragas 未安装，请运行: pip install ragas")
         return None
@@ -131,10 +143,7 @@ def _run_ragas_evaluation():
     _log.info("开始 Ragas 评测 | samples={}", len(samples))
 
     try:
-        from app.core.llm import get_llm
-        from ragas.llms import LangchainLLMWrapper
-
-        evaluator_llm = LangchainLLMWrapper(get_llm("primary"))
+        evaluator_llm = _get_evaluator_llm()
 
         metrics = [
             Faithfulness(llm=evaluator_llm),
@@ -148,10 +157,17 @@ def _run_ragas_evaluation():
         return results
     except Exception as e:
         _log.error("Ragas 评测执行失败 | error={}", str(e))
-        _log.info("尝试使用默认 LLM 进行评测...")
+        _log.info("尝试使用 Fallback LLM 进行评测...")
 
         try:
-            metrics = [Faithfulness(), ResponseRelevancy()]
+            from app.core.llm import get_llm
+            from ragas.llms import LangchainLLMWrapper
+
+            fallback_llm = LangchainLLMWrapper(get_llm("fallback"))
+            metrics = [
+                Faithfulness(llm=fallback_llm),
+                ResponseRelevancy(llm=fallback_llm),
+            ]
             results = evaluate(
                 dataset=eval_dataset,
                 metrics=metrics,

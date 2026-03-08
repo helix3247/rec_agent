@@ -18,6 +18,29 @@ def start_node_timer() -> float:
     return time.time()
 
 
+def extract_token_usage(response) -> dict[str, int]:
+    """从 LangChain LLM 响应对象中提取 token_usage 信息。"""
+    usage: dict[str, int] = {}
+    if response is None:
+        return usage
+    meta = getattr(response, "response_metadata", None) or {}
+    token_usage = meta.get("token_usage") or meta.get("usage") or {}
+    if token_usage:
+        usage["prompt_tokens"] = token_usage.get("prompt_tokens", 0)
+        usage["completion_tokens"] = token_usage.get("completion_tokens", 0)
+        usage["total_tokens"] = token_usage.get("total_tokens", 0)
+    return usage
+
+
+def merge_token_usage(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    """合并两个 token_usage 字典。"""
+    return {
+        "prompt_tokens": a.get("prompt_tokens", 0) + b.get("prompt_tokens", 0),
+        "completion_tokens": a.get("completion_tokens", 0) + b.get("completion_tokens", 0),
+        "total_tokens": a.get("total_tokens", 0) + b.get("total_tokens", 0),
+    }
+
+
 def record_node_metrics(
     state: AgentState,
     node_name: str,
@@ -34,18 +57,6 @@ def record_node_metrics(
     调用方将返回值合并到节点返回的 dict 中即可:
         metrics_update = record_node_metrics(state, "ShoppingAgent", t0, ...)
         return {**result, **metrics_update}
-
-    Args:
-        state: 当前 AgentState。
-        node_name: 节点名称。
-        start_time: 节点开始时间戳（由 start_node_timer() 获取）。
-        token_usage: Token 消耗 {"prompt_tokens": ..., "completion_tokens": ..., "total_tokens": ...}
-        tool_calls: 工具调用记录列表 [{"tool_name": ..., "success": ..., "error": ...}]
-        success: 节点是否执行成功。
-        error: 错误信息（如果有）。
-
-    Returns:
-        包含 _node_metrics 和 _agent_route_path 的增量字典。
     """
     end_time = time.time()
     latency_ms = round((end_time - start_time) * 1000, 1)

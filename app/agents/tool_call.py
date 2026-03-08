@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.state import AgentState
 from app.core.llm import get_llm
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.tools.db import query_order_status
 from app.prompts.tool_call import TOOL_CALL_SYSTEM_PROMPT
 
@@ -39,6 +40,7 @@ def _format_order_results(orders: list[dict]) -> str:
 
 def tool_call_node(state: AgentState) -> dict:
     """ToolCallAgent 节点：根据用户请求调用工具并返回结果。"""
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     user_id = state.get("user_id", "")
     messages = state.get("messages", [])
@@ -46,52 +48,62 @@ def tool_call_node(state: AgentState) -> dict:
 
     log.info("工具调用开始 | user_id={}", user_id)
 
-    # 获取用户查询
     query = ""
     for msg in reversed(messages):
         if hasattr(msg, "type") and msg.type == "human":
             query = msg.content
             break
 
-    # 目前支持的工具：订单查询
+    tool_calls_log: list[dict] = []
+    token_usage: dict[str, int] = {}
     tool_result = ""
     if user_id:
         try:
             orders = query_order_status(user_id)
             tool_result = _format_order_results(orders)
             log.info("订单查询完成 | orders_count={}", len(orders))
+            tool_calls_log.append({"tool_name": "query_order_status", "success": True})
         except Exception as e:
             log.error("订单查询失败 | error={}", str(e))
             tool_result = "（订单查询失败，请稍后重试）"
+            tool_calls_log.append({"tool_name": "query_order_status", "success": False, "error": str(e)})
     else:
         tool_result = "（未提供用户 ID，无法查询订单信息）"
 
-    # LLM 生成自然语言回复
-    system_prompt = TOOL_CALL_SYSTEM_PROMPT.format(
-        query=query,
-        tool_result=tool_result,
-    )
+    system_prompt = TOOL_CALL_SYSTEM_PROMPT.format(query=query, tool_result=tool_result)
 
+    node_success = True
+    node_error = ""
     try:
         llm = get_llm("primary")
         response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
         reply = response.content
+        token_usage = extract_token_usage(response)
     except Exception as e:
         log.warning("主模型调用失败，使用 fallback | error={}", str(e))
         try:
             llm = get_llm("fallback")
             response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
             reply = response.content
-        except Exception:
+            token_usage = extract_token_usage(response)
+        except Exception as fe:
             if tool_result and "未查询" not in tool_result:
                 reply = f"以下是您的订单信息：\n{tool_result}"
             else:
                 reply = "抱歉，暂时无法查询到您的订单信息。请确认您是否已登录，或提供订单号进行查询。"
+            node_success = False
+            node_error = str(fe)
 
     log.info("工具调用完成")
-    return {
+    node_result = {
         "current_agent": "ToolCallAgent",
         "response": reply,
         "messages": [AIMessage(content=reply)],
         "task_status": "completed",
     }
+    metrics = record_node_metrics(
+        state, "ToolCallAgent", t0,
+        token_usage=token_usage, tool_calls=tool_calls_log,
+        success=node_success, error=node_error,
+    )
+    return {**node_result, **metrics}

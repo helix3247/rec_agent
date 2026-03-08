@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.state import AgentState
 from app.core.llm import get_llm
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.tools.search import search_products
 from app.tools.db import get_user_profile
 from app.tools.personalization import rerank_by_user_profile
@@ -80,6 +81,7 @@ def _build_outfit_candidates(category_results: dict[str, list[dict]]) -> list[di
 
 def outfit_node(state: AgentState) -> dict:
     """OutfitAgent 节点：多品类检索 -> 个性化排序 -> LLM 生成穿搭方案。"""
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     user_id = state.get("user_id", "")
     slots = state.get("slots", {})
@@ -93,7 +95,6 @@ def outfit_node(state: AgentState) -> dict:
     if reflection_feedback:
         log.info("收到反思修正建议 | feedback={}", reflection_feedback[:100])
 
-    # 获取用户查询
     query = ""
     for msg in reversed(messages):
         if hasattr(msg, "type") and msg.type == "human":
@@ -104,48 +105,37 @@ def outfit_node(state: AgentState) -> dict:
     style = slots.get("style", "")
     budget = slots.get("budget", "")
     price_per_cat = _parse_price_per_category(budget)
+    tool_calls_log: list[dict] = []
+    token_usage: dict[str, int] = {}
 
-    # 获取用户画像
     user_profile = None
     if user_id:
         try:
             user_profile = get_user_profile(user_id)
+            tool_calls_log.append({"tool_name": "get_user_profile", "success": True})
         except Exception as e:
             log.warning("用户画像获取失败 | error={}", str(e))
+            tool_calls_log.append({"tool_name": "get_user_profile", "success": False, "error": str(e)})
 
-    # 场景关联标签
     scenario_tags = _SCENARIO_TAGS.get(scenario, [])
-
-    # 重试时放宽价格限制
     relax_price = retry_count >= 1
     effective_price = None if relax_price else price_per_cat
 
-    # ── 多品类并发检索 ──
     _MAX_CONCURRENT_SEARCHES = 4
 
     def _search_single_category(cat: str) -> tuple[str, list[dict]]:
-        """单个品类的检索逻辑（含自动放宽）。"""
         search_query = f"{scenario} {style} {cat}".strip() or cat
         try:
             products = search_products(
-                query=search_query,
-                category=cat,
-                max_price=effective_price,
-                tags=scenario_tags or None,
-                top_k=5,
+                query=search_query, category=cat,
+                max_price=effective_price, tags=scenario_tags or None, top_k=5,
             )
             if len(products) < 3:
                 products = search_products(
-                    query=search_query,
-                    category=cat,
-                    max_price=effective_price,
-                    top_k=5,
+                    query=search_query, category=cat, max_price=effective_price, top_k=5,
                 )
             if len(products) < 2:
-                products = search_products(
-                    query=cat,
-                    top_k=5,
-                )
+                products = search_products(query=cat, top_k=5)
             products = rerank_by_user_profile(products, user_profile)
             return cat, products
         except Exception as e:
@@ -164,26 +154,27 @@ def outfit_node(state: AgentState) -> dict:
                 cat, products = future.result(timeout=30)
                 category_results[cat] = products
                 log.info("品类 {} 检索返回 {} 个商品", cat, len(products))
+                tool_calls_log.append({"tool_name": f"search_{cat}", "success": True})
             except Exception as e:
                 log.error("品类 {} 并发检索异常 | error={}", cat_name, str(e))
                 category_results[cat_name] = []
+                tool_calls_log.append({"tool_name": f"search_{cat_name}", "success": False, "error": str(e)})
 
-    # ── LLM 生成穿搭方案 ──
     category_products_text = _format_category_products(category_results)
-
     system_prompt = OUTFIT_SYSTEM_PROMPT.format(
-        query=query,
-        scenario=scenario or "未指定",
-        style=style or "未指定",
-        budget=budget or "不限",
+        query=query, scenario=scenario or "未指定",
+        style=style or "未指定", budget=budget or "不限",
         category_products=category_products_text,
     )
 
+    node_success = True
+    node_error = ""
     try:
         llm = get_llm("primary")
         llm_messages = [SystemMessage(content=system_prompt)] + messages
         response = llm.invoke(llm_messages)
         reply = response.content
+        token_usage = extract_token_usage(response)
     except Exception as e:
         log.warning("主模型调用失败，使用 fallback | error={}", str(e))
         try:
@@ -191,19 +182,28 @@ def outfit_node(state: AgentState) -> dict:
             llm_messages = [SystemMessage(content=system_prompt)] + messages
             response = llm.invoke(llm_messages)
             reply = response.content
-        except Exception:
+            token_usage = extract_token_usage(response)
+        except Exception as fe:
             reply = _build_fallback_response(category_results)
+            node_success = False
+            node_error = str(fe)
 
     candidates = _build_outfit_candidates(category_results)
 
     log.info("穿搭推荐完成 | candidates_count={}", len(candidates))
-    return {
+    node_result = {
         "current_agent": "OutfitAgent",
         "response": reply,
         "candidates": candidates,
         "messages": [AIMessage(content=reply)],
         "task_status": "completed",
     }
+    metrics = record_node_metrics(
+        state, "OutfitAgent", t0,
+        token_usage=token_usage, tool_calls=tool_calls_log,
+        success=node_success, error=node_error,
+    )
+    return {**node_result, **metrics}
 
 
 def _build_fallback_response(category_results: dict[str, list[dict]]) -> str:

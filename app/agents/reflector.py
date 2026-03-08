@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.state import AgentState
 from app.core.llm import get_llm, invoke_with_fallback_sync
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.reflector import REFLECTOR_SYSTEM_PROMPT, REFLECTOR_BUDGET_ADVICE_PROMPT
 
 MAX_RETRIES = 3
@@ -105,6 +106,7 @@ def reflector_node(state: AgentState) -> dict:
     - 不通过 -> 生成修正建议，回退给上游重试
     - 达到最大重试次数 -> 转入澄清 / 给出预算调整建议
     """
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     retry_count = state.get("reflection_count", 0)
     response = state.get("response", "")
@@ -113,6 +115,7 @@ def reflector_node(state: AgentState) -> dict:
     messages = state.get("messages", [])
     current_agent = state.get("current_agent", "")
     log = get_logger(agent_name="Reflector", trace_id=trace_id)
+    token_usage: dict[str, int] = {}
 
     log.info(
         "反思检查开始 | upstream={} | retry={}/{} | candidates_count={}",
@@ -146,6 +149,7 @@ def reflector_node(state: AgentState) -> dict:
         try:
             llm = get_llm("primary", temperature=0.1)
             llm_result = llm.invoke([SystemMessage(content=system_prompt)])
+            token_usage = extract_token_usage(llm_result)
             reflection = _extract_json(llm_result.content)
             log.info(
                 "LLM 反思结果 | passed={} | strategy={}",
@@ -158,28 +162,30 @@ def reflector_node(state: AgentState) -> dict:
     # ── 3. 根据反思结果决定下一步 ──
     if reflection.get("passed", True):
         log.info("反思通过，放行到 ResponseFormatter")
-        return {
+        node_result = {
             "current_agent": "Reflector",
             "reflection_count": 0,
             "reflection_feedback": "",
         }
+        return {**node_result, **record_node_metrics(state, "Reflector", t0, token_usage=token_usage)}
 
     new_retry_count = retry_count + 1
     strategy = reflection.get("strategy", "relax_filter")
 
     if new_retry_count > MAX_RETRIES or strategy == "clarify":
         log.info("达到最大重试次数或需要澄清，转入对话模式")
-        return {
+        node_result = {
             "current_agent": "Reflector",
             "task_status": "needs_clarify",
             "reflection_count": new_retry_count,
             "reflection_feedback": reflection.get("suggestion", ""),
         }
+        return {**node_result, **record_node_metrics(state, "Reflector", t0, token_usage=token_usage)}
 
     if strategy == "adjust_budget":
         log.info("需求不合理，生成预算调整建议")
         advice = _generate_budget_advice(slots, log)
-        return {
+        node_result = {
             "current_agent": "Reflector",
             "task_status": "completed",
             "response": advice,
@@ -187,6 +193,7 @@ def reflector_node(state: AgentState) -> dict:
             "reflection_count": 0,
             "reflection_feedback": "",
         }
+        return {**node_result, **record_node_metrics(state, "Reflector", t0, token_usage=token_usage)}
 
     # 需要重试：根据策略调整 slots 和 feedback
     feedback = reflection.get("suggestion", "请扩大检索范围重试")
@@ -211,13 +218,14 @@ def reflector_node(state: AgentState) -> dict:
         strategy, new_retry_count, MAX_RETRIES, feedback[:100],
     )
 
-    return {
+    node_result = {
         "current_agent": "Reflector",
         "task_status": "retrying",
         "reflection_count": new_retry_count,
         "reflection_feedback": feedback,
         "slots": adjusted_slots,
     }
+    return {**node_result, **record_node_metrics(state, "Reflector", t0, token_usage=token_usage)}
 
 
 def reflect_route(state: AgentState) -> str:

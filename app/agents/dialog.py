@@ -23,6 +23,7 @@ from app.state import AgentState
 from app.core.config import settings
 from app.core.llm import get_llm
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.dialog import CLARIFY_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT
 from app.tools.memory import (
     migrate_to_long_term,
@@ -198,6 +199,7 @@ def dialog_node(state: AgentState) -> dict:
     - 如果 intent 为 chat，进行闲聊回复。
     - 负责将本轮对话保存到 Redis（历史已由 API 层加载并注入 state.messages）。
     """
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     thread_id = state.get("thread_id", "")
     intent = state.get("user_intent", "chat")
@@ -212,14 +214,15 @@ def dialog_node(state: AgentState) -> dict:
     merged_slots = {**stored_slots, **{k: v for k, v in slots.items() if v}}
 
     missing = _find_missing_slots(intent, merged_slots)
+    token_usage: dict[str, int] = {}
 
     if missing and intent in ("search", "outfit"):
         log.info("槽位缺失，生成追问 | missing={}", missing)
-        reply = _generate_clarification(intent, merged_slots, missing, messages, log)
+        reply, token_usage = _generate_clarification(intent, merged_slots, missing, messages, log)
         task_status = "clarifying"
     else:
         log.info("进入闲聊/通用对话模式")
-        reply = _generate_chat_reply(messages, log)
+        reply, token_usage = _generate_chat_reply(messages, log)
         task_status = "completed"
 
     # 将包含本轮回复的完整对话保存到 Redis
@@ -231,13 +234,17 @@ def dialog_node(state: AgentState) -> dict:
     check_and_migrate_memory(thread_id, user_id)
 
     log.info("DialogFlow 完成 | status={}", task_status)
-    return {
+    node_result = {
         "current_agent": "DialogFlow",
         "response": reply,
         "messages": [AIMessage(content=reply)],
         "task_status": task_status,
         "slots": merged_slots,
     }
+    metrics = record_node_metrics(
+        state, "DialogFlow", t0, token_usage=token_usage,
+    )
+    return {**node_result, **metrics}
 
 
 def _generate_clarification(
@@ -246,8 +253,8 @@ def _generate_clarification(
     missing: list[str],
     messages: list[BaseMessage],
     log,
-) -> str:
-    """调用 LLM 生成澄清式追问。"""
+) -> tuple[str, dict[str, int]]:
+    """调用 LLM 生成澄清式追问。返回 (回复文本, token_usage)。"""
     slot_labels = {
         "budget": "预算",
         "category": "品类",
@@ -267,28 +274,28 @@ def _generate_clarification(
     try:
         llm = get_llm("primary")
         response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
-        return response.content
+        return response.content, extract_token_usage(response)
     except Exception as e:
         log.warning("澄清式对话 LLM 调用失败，使用 fallback | error={}", str(e))
         try:
             llm = get_llm("fallback")
             response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
-            return response.content
+            return response.content, extract_token_usage(response)
         except Exception:
-            return "请问您能补充一下更多信息吗？比如预算范围、使用场景等，这样我能更好地为您推荐。"
+            return "请问您能补充一下更多信息吗？比如预算范围、使用场景等，这样我能更好地为您推荐。", {}
 
 
-def _generate_chat_reply(messages: list[BaseMessage], log) -> str:
-    """调用 LLM 生成闲聊回复。"""
+def _generate_chat_reply(messages: list[BaseMessage], log) -> tuple[str, dict[str, int]]:
+    """调用 LLM 生成闲聊回复。返回 (回复文本, token_usage)。"""
     try:
         llm = get_llm("primary")
         response = llm.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages)
-        return response.content
+        return response.content, extract_token_usage(response)
     except Exception as e:
         log.warning("闲聊 LLM 调用失败，使用 fallback | error={}", str(e))
         try:
             llm = get_llm("fallback")
             response = llm.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages)
-            return response.content
+            return response.content, extract_token_usage(response)
         except Exception:
-            return "你好！有什么可以帮您的吗？如果您有购物需求，可以直接告诉我。"
+            return "你好！有什么可以帮您的吗？如果您有购物需求，可以直接告诉我。", {}

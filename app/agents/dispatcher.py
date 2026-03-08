@@ -6,6 +6,7 @@ TaskDispatcherAgent —— 根据意图和槽位状态进行动态路由。
 
 from app.state import AgentState
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics
 
 
 _SLOT_REQUIREMENTS = {
@@ -16,6 +17,7 @@ _SLOT_REQUIREMENTS = {
 
 def dispatcher_node(state: AgentState) -> dict:
     """Dispatcher 节点：记录路由决策日志。实际路由由条件边 dispatch_route 完成。"""
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     intent = state.get("user_intent", "unknown")
     slots = state.get("slots", {})
@@ -27,10 +29,12 @@ def dispatcher_node(state: AgentState) -> dict:
     else:
         log.info("调度决策: 槽位完整，转专家 Agent | intent={}", intent)
 
-    return {
+    node_result = {
         "current_agent": "Dispatcher",
         "task_status": "in_progress",
     }
+    metrics = record_node_metrics(state, "Dispatcher", t0)
+    return {**node_result, **metrics}
 
 
 def dispatch_route(state: AgentState) -> str:

@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.state import AgentState
 from app.core.llm import get_llm, invoke_with_fallback_sync
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_INTEGRATE_PROMPT
 
 MAX_PLAN_STEPS = 5
@@ -125,6 +126,7 @@ def planner_node(state: AgentState) -> dict:
     B) 子任务返回（有 plan_steps 且 plan_current_step < len）-> 收集结果 -> 准备下一个子任务
     C) 所有子任务完成 -> 整合结果 -> 输出最终回答
     """
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     plan_steps = state.get("plan_steps", [])
     plan_current = state.get("plan_current_step", 0)
@@ -148,7 +150,7 @@ def planner_node(state: AgentState) -> dict:
         if not steps:
             log.warning("规划结果为空，回退到通用回答")
             fallback_reply = f"关于「{query}」，我建议您可以分步骤来选购。请告诉我您最关心的品类，我来为您推荐。"
-            return {
+            node_result = {
                 "current_agent": "PlannerNode",
                 "response": fallback_reply,
                 "messages": [AIMessage(content=fallback_reply)],
@@ -157,6 +159,7 @@ def planner_node(state: AgentState) -> dict:
                 "plan_current_step": 0,
                 "plan_results": [],
             }
+            return {**node_result, **record_node_metrics(state, "PlannerNode", t0)}
 
         formatted_steps = []
         for s in steps:
@@ -171,7 +174,6 @@ def planner_node(state: AgentState) -> dict:
 
         log.info("任务计划生成完成 | summary={} | steps={}", plan.get("plan_summary", ""), len(formatted_steps))
 
-        # 准备执行第一个子任务
         first_step = formatted_steps[0]
         first_params = first_step.get("params", {})
         step_slots = dict(slots)
@@ -179,7 +181,7 @@ def planner_node(state: AgentState) -> dict:
             if first_params.get(key):
                 step_slots[key] = first_params[key]
 
-        return {
+        node_result = {
             "current_agent": "PlannerNode",
             "task_status": "executing_step",
             "plan_steps": formatted_steps,
@@ -188,6 +190,7 @@ def planner_node(state: AgentState) -> dict:
             "response": plan.get("plan_summary", ""),
             "slots": step_slots,
         }
+        return {**node_result, **record_node_metrics(state, "PlannerNode", t0)}
 
     # ── 模式 B / C: 从子任务返回 ──
     # 收集上一个子任务的结果
@@ -208,7 +211,7 @@ def planner_node(state: AgentState) -> dict:
                 f"关于「{prev_step.get('description', '该步骤')}」我暂时没有找到合适的结果。"
                 "请补充更具体的需求（如预算、品类或偏好），我再继续为您规划。"
             )
-            return {
+            node_result = {
                 "current_agent": "PlannerNode",
                 "response": clarify_reply,
                 "messages": [AIMessage(content=clarify_reply)],
@@ -217,6 +220,7 @@ def planner_node(state: AgentState) -> dict:
                 "plan_current_step": 0,
                 "plan_results": plan_results,
             }
+            return {**node_result, **record_node_metrics(state, "PlannerNode", t0)}
 
     # 检查是否所有步骤已完成
     if plan_current >= len(plan_steps):
@@ -230,7 +234,7 @@ def planner_node(state: AgentState) -> dict:
         for r in plan_results:
             all_candidates.extend(r.get("candidates", []))
 
-        return {
+        node_result = {
             "current_agent": "PlannerNode",
             "response": integrated,
             "messages": [AIMessage(content=integrated)],
@@ -240,6 +244,7 @@ def planner_node(state: AgentState) -> dict:
             "plan_current_step": 0,
             "plan_results": [],
         }
+        return {**node_result, **record_node_metrics(state, "PlannerNode", t0)}
 
     # ── 准备执行下一个子任务 ──
     current_step = plan_steps[plan_current]
@@ -251,19 +256,19 @@ def planner_node(state: AgentState) -> dict:
         plan_current + 1, len(plan_steps), agent, current_step.get("description", ""),
     )
 
-    # 将子任务参数注入 slots
     step_slots = dict(slots)
     for key in ("category", "budget", "scenario", "style", "must_have"):
         if params.get(key):
             step_slots[key] = params[key]
 
-    return {
+    node_result = {
         "current_agent": "PlannerNode",
         "task_status": "executing_step",
         "plan_current_step": plan_current + 1,
         "plan_results": plan_results,
         "slots": step_slots,
     }
+    return {**node_result, **record_node_metrics(state, "PlannerNode", t0)}
 
 
 def planner_route(state: AgentState) -> str:

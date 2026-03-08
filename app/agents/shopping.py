@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.state import AgentState
 from app.core.llm import get_llm
 from app.core.logger import get_logger
+from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.tools.search import search_products
 from app.tools.db import get_user_profile
 from app.tools.personalization import rerank_by_user_profile
@@ -101,6 +102,7 @@ def _build_candidates(products: list[dict], max_count: int = 5) -> list[dict]:
 
 def shopping_node(state: AgentState) -> dict:
     """ShoppingAgent 节点：调用检索工具 -> 个性化排序 -> LLM 生成推荐。"""
+    t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
     user_id = state.get("user_id", "")
     intent = state.get("user_intent", "search")
@@ -115,34 +117,30 @@ def shopping_node(state: AgentState) -> dict:
     if reflection_feedback:
         log.info("收到反思修正建议 | feedback={}", reflection_feedback[:100])
 
-    # 获取用户最后一条查询
     query = ""
     for msg in reversed(messages):
         if hasattr(msg, "type") and msg.type == "human":
             query = msg.content
             break
 
-    # 若 reflector 指示改写查询，则使用改写后的查询
     if reflection_feedback and "改写查询为:" in reflection_feedback:
         rewritten = reflection_feedback.split("改写查询为:")[-1].strip()
         if rewritten:
             log.info("使用反思改写查询 | original={} | rewritten={}", query, rewritten)
             query = rewritten
 
-    # ── 1. 解析检索参数 ──
     category = slots.get("category", "")
     budget = slots.get("budget", "")
     min_price, max_price = _parse_price_range(budget)
-
-    # 重试时若仍无结果，逐步放宽过滤
     relax_category = retry_count >= 2
+    tool_calls_log: list[dict] = []
+    token_usage: dict[str, int] = {}
 
     log.info(
         "检索参数 | query={} | category={} | price=[{}, {}] | relax={}",
         query, category, min_price, max_price, relax_category,
     )
 
-    # ── 2. 调用 ES 检索 ──
     try:
         products = search_products(
             query=query,
@@ -151,7 +149,7 @@ def shopping_node(state: AgentState) -> dict:
             max_price=max_price,
             top_k=10,
         )
-        # 如果结果仍然不足且有价格限制，去掉价格限制再试一次
+        tool_calls_log.append({"tool_name": "search_products", "success": True})
         if len(products) < 3 and (min_price or max_price):
             log.info("结果不足，放宽价格限制重试")
             products = search_products(
@@ -159,22 +157,24 @@ def shopping_node(state: AgentState) -> dict:
                 category=(category or None) if not relax_category else None,
                 top_k=10,
             )
+            tool_calls_log.append({"tool_name": "search_products_relax", "success": True})
         log.info("ES 检索返回 {} 个商品", len(products))
     except Exception as e:
         log.error("商品检索失败 | error={}", str(e))
         products = []
+        tool_calls_log.append({"tool_name": "search_products", "success": False, "error": str(e)})
 
-    # ── 3. 获取用户画像并个性化排序 ──
     user_profile = None
     if user_id:
         try:
             user_profile = get_user_profile(user_id)
+            tool_calls_log.append({"tool_name": "get_user_profile", "success": True})
         except Exception as e:
             log.warning("用户画像获取失败 | error={}", str(e))
+            tool_calls_log.append({"tool_name": "get_user_profile", "success": False, "error": str(e)})
 
     products = rerank_by_user_profile(products, user_profile)
 
-    # ── 4. LLM 生成推荐回答 ──
     products_text = _format_products_for_prompt(products)
     profile_summary = _format_user_profile_summary(user_profile)
 
@@ -191,11 +191,14 @@ def shopping_node(state: AgentState) -> dict:
             user_profile_summary=profile_summary,
         )
 
+    node_success = True
+    node_error = ""
     try:
         llm = get_llm("primary")
         llm_messages = [SystemMessage(content=system_prompt)] + messages
         response = llm.invoke(llm_messages)
         reply = response.content
+        token_usage = extract_token_usage(response)
     except Exception as e:
         log.warning("主模型调用失败，使用 fallback | error={}", str(e))
         try:
@@ -203,19 +206,28 @@ def shopping_node(state: AgentState) -> dict:
             llm_messages = [SystemMessage(content=system_prompt)] + messages
             response = llm.invoke(llm_messages)
             reply = response.content
-        except Exception:
+            token_usage = extract_token_usage(response)
+        except Exception as fe:
             reply = _build_fallback_response(products)
+            node_success = False
+            node_error = str(fe)
 
     candidates = _build_candidates(products)
 
     log.info("导购推荐完成 | candidates_count={}", len(candidates))
-    return {
+    node_result = {
         "current_agent": "ShoppingAgent",
         "response": reply,
         "candidates": candidates,
         "messages": [AIMessage(content=reply)],
         "task_status": "completed",
     }
+    metrics = record_node_metrics(
+        state, "ShoppingAgent", t0,
+        token_usage=token_usage, tool_calls=tool_calls_log,
+        success=node_success, error=node_error,
+    )
+    return {**node_result, **metrics}
 
 
 def _build_fallback_response(products: list[dict]) -> str:
