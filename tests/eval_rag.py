@@ -1,16 +1,22 @@
 """
 tests/eval_rag.py
-RAG 质量评测 —— 使用 Ragas 计算 Faithfulness 和 Answer Relevance 指标。
+RAG 质量评测 —— 使用 Ragas 计算多维度指标。
 
 使用方式:
     conda activate rec_agent
     python tests/eval_rag.py
+    python tests/eval_rag.py --cross-judge   # 启用非同源 Judge 模型
 
 评测流程:
     1. 定义测试集（query + contexts + reference answer）
     2. 调用 RAGAgent 获取实际回答
-    3. 使用 Ragas 计算 Faithfulness & Answer Relevance
-    4. 输出评测报告
+    3. 使用 Ragas 计算四项核心指标:
+        - Faithfulness: 回答是否忠实于检索上下文
+        - ResponseRelevancy: 回答与问题的相关度
+        - ContextPrecision: 检索上下文中相关片段的精确度
+        - LLMContextRecall: 参考答案的信息能被检索上下文覆盖的程度
+    4. 支持非同源 Judge（primary 生成回答，fallback 做评测）
+    5. 输出评测报告
 """
 
 import json
@@ -106,23 +112,44 @@ def _generate_rag_responses():
             sample["response"] = "抱歉，无法生成回答。"
 
 
-def _get_evaluator_llm():
-    """获取评测用的 LLM，兼容 DeepSeek 等不支持 n>1 的 API。"""
+def _get_evaluator_llm(model_type: str = "primary"):
+    """获取评测用的 LLM，支持指定模型类型以实现非同源 Judge。"""
     from app.core.llm import get_llm
     from ragas.llms import LangchainLLMWrapper
 
-    llm = get_llm("primary")
+    llm = get_llm(model_type)
     return LangchainLLMWrapper(llm)
 
 
-def _run_ragas_evaluation():
-    """使用 Ragas 进行 Faithfulness 和 Answer Relevance 评测。"""
+def _load_metrics(evaluator_llm):
+    """加载 Ragas 评测指标（Faithfulness + ResponseRelevancy + ContextPrecision + LLMContextRecall）。"""
+    try:
+        from ragas.metrics.collections import (
+            Faithfulness, ResponseRelevancy,
+            ContextPrecision, LLMContextRecall,
+        )
+    except ImportError:
+        from ragas.metrics import (
+            Faithfulness, ResponseRelevancy,
+            ContextPrecision, LLMContextRecall,
+        )
+
+    return [
+        Faithfulness(llm=evaluator_llm),
+        ResponseRelevancy(llm=evaluator_llm),
+        ContextPrecision(llm=evaluator_llm),
+        LLMContextRecall(llm=evaluator_llm),
+    ]
+
+
+def _run_ragas_evaluation(judge_model: str = "primary"):
+    """使用 Ragas 进行四维度评测。
+
+    Args:
+        judge_model: 评测用 LLM 模型类型，"primary" 为同源，"fallback" 为非同源。
+    """
     try:
         from ragas import SingleTurnSample, EvaluationDataset, evaluate
-        try:
-            from ragas.metrics.collections import Faithfulness, ResponseRelevancy
-        except ImportError:
-            from ragas.metrics import Faithfulness, ResponseRelevancy
     except ImportError:
         _log.error("ragas 未安装，请运行: pip install ragas")
         return None
@@ -140,15 +167,11 @@ def _run_ragas_evaluation():
 
     eval_dataset = EvaluationDataset(samples=samples)
 
-    _log.info("开始 Ragas 评测 | samples={}", len(samples))
+    _log.info("开始 Ragas 评测 | samples={} | judge_model={}", len(samples), judge_model)
 
     try:
-        evaluator_llm = _get_evaluator_llm()
-
-        metrics = [
-            Faithfulness(llm=evaluator_llm),
-            ResponseRelevancy(llm=evaluator_llm),
-        ]
+        evaluator_llm = _get_evaluator_llm(judge_model)
+        metrics = _load_metrics(evaluator_llm)
 
         results = evaluate(
             dataset=eval_dataset,
@@ -156,52 +179,52 @@ def _run_ragas_evaluation():
         )
         return results
     except Exception as e:
-        _log.error("Ragas 评测执行失败 | error={}", str(e))
-        _log.info("尝试使用 Fallback LLM 进行评测...")
+        _log.error("Ragas 评测执行失败 | judge={} | error={}", judge_model, str(e))
 
-        try:
-            from app.core.llm import get_llm
-            from ragas.llms import LangchainLLMWrapper
-
-            fallback_llm = LangchainLLMWrapper(get_llm("fallback"))
-            metrics = [
-                Faithfulness(llm=fallback_llm),
-                ResponseRelevancy(llm=fallback_llm),
-            ]
-            results = evaluate(
-                dataset=eval_dataset,
-                metrics=metrics,
-            )
-            return results
-        except Exception as e2:
-            _log.error("Ragas 评测完全失败 | error={}", str(e2))
+        if judge_model != "fallback":
+            _log.info("尝试使用 Fallback LLM 进行评测...")
+            try:
+                fallback_llm = _get_evaluator_llm("fallback")
+                metrics = _load_metrics(fallback_llm)
+                results = evaluate(
+                    dataset=eval_dataset,
+                    metrics=metrics,
+                )
+                return results
+            except Exception as e2:
+                _log.error("Ragas 评测完全失败 | error={}", str(e2))
+                return None
+        else:
+            _log.error("Ragas 评测完全失败 | error={}", str(e))
             return None
 
 
-def _print_report(results):
+def _print_report(results, label: str = ""):
     """输出评测报告。"""
+    title_suffix = f" [{label}]" if label else ""
     print("\n" + "=" * 70)
-    print("  RAG 质量评测报告 (Ragas)")
+    print(f"  RAG 质量评测报告 (Ragas){title_suffix}")
     print("=" * 70)
 
     if results is None:
         print("  [ERROR] 评测失败，请检查依赖和配置")
         print("=" * 70)
-        return False
+        return False, {}
 
     print(f"\n  评测样本数: {len(EVAL_DATASET)}")
+    print(f"  评测指标: Faithfulness, ResponseRelevancy, ContextPrecision, LLMContextRecall")
     print()
 
-    # 汇总分数
     scores = results.scores if hasattr(results, "scores") else results
+    avg_scores = {}
     if isinstance(scores, dict):
+        avg_scores = scores
         for metric_name, score in scores.items():
             status = "[OK]" if score >= 0.7 else "[WARN]"
             print(f"  {status} {metric_name}: {score:.4f}")
     else:
         print(f"  评测结果: {results!r}")
 
-    # 逐样本得分
     if hasattr(results, "to_pandas"):
         print("\n  逐样本得分:")
         print("  " + "-" * 66)
@@ -216,10 +239,6 @@ def _print_report(results):
 
     print("\n" + "=" * 70)
 
-    # 判定是否通过
-    avg_scores = {}
-    if isinstance(scores, dict):
-        avg_scores = scores
     overall_ok = all(v >= 0.6 for v in avg_scores.values()) if avg_scores else True
 
     if overall_ok:
@@ -229,50 +248,115 @@ def _print_report(results):
 
     print("=" * 70)
 
-    # 保存报告到文件
+    return overall_ok, avg_scores
+
+
+def _save_report(all_scores: dict, cross_scores: dict | None, overall_ok: bool):
+    """保存评测报告到 JSON 文件。"""
     report_path = Path(__file__).parent.parent / "logs" / "eval_rag_report.json"
     report_path.parent.mkdir(exist_ok=True)
+
     report_data = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "samples": len(EVAL_DATASET),
-        "scores": {k: round(v, 4) for k, v in avg_scores.items()} if avg_scores else {},
+        "metrics": ["faithfulness", "answer_relevancy", "context_precision", "llm_context_recall"],
+        "scores": {k: round(v, 4) for k, v in all_scores.items()} if all_scores else {},
         "passed": overall_ok,
     }
+
+    if cross_scores:
+        report_data["cross_judge_scores"] = {k: round(v, 4) for k, v in cross_scores.items()}
+
     report_path.write_text(json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n  报告已保存至: {report_path}")
-
-    return overall_ok
 
 
 def main():
     """运行 RAG 评测流程。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="RAG 质量评测")
+    parser.add_argument("--cross-judge", action="store_true",
+                        help="启用非同源 Judge 模式（primary 生成回答，fallback 做评测）")
+    args = parser.parse_args()
+
+    cross_judge = args.cross_judge
+
+    metrics_desc = "Faithfulness, ResponseRelevancy, ContextPrecision, LLMContextRecall"
     print("=" * 70)
-    print("  RAG 质量评测 (Ragas) - Faithfulness & Answer Relevance")
+    print(f"  RAG 质量评测 (Ragas)")
+    print(f"  评测指标: {metrics_desc}")
+    if cross_judge:
+        print("  Judge 模式: 非同源 (primary 生成, fallback 评测)")
     print("=" * 70)
 
-    # Step 1: 生成 RAG 回答
-    print("\n[1/2] 生成 RAG 回答...")
+    # Step 1: 生成 RAG 回答（始终用 primary）
+    steps = 3 if cross_judge else 2
+    print(f"\n[1/{steps}] 生成 RAG 回答...")
     t0 = time.time()
     _generate_rag_responses()
     gen_time = time.time() - t0
     print(f"      完成 ({gen_time:.1f}s)")
 
-    # 展示生成结果
     for i, sample in enumerate(EVAL_DATASET, 1):
         print(f"\n  样本 {i}: {sample['user_input']}")
         print(f"  回答:   {sample['response'][:100]}...")
 
-    # Step 2: Ragas 评测
-    print(f"\n[2/2] 运行 Ragas 评测...")
+    # Step 2: Ragas 评测（primary judge）
+    print(f"\n[2/{steps}] 运行 Ragas 评测 (primary judge)...")
     t1 = time.time()
-    results = _run_ragas_evaluation()
+    results = _run_ragas_evaluation(judge_model="primary")
     eval_time = time.time() - t1
     print(f"      完成 ({eval_time:.1f}s)")
 
-    # Step 3: 输出报告
-    passed = _print_report(results)
+    passed, primary_scores = _print_report(results, label="Primary Judge")
+
+    # Step 3: 非同源 Judge 评测（cross_judge 模式）
+    cross_scores = None
+    if cross_judge:
+        print(f"\n[3/{steps}] 运行 Ragas 评测 (cross judge / fallback)...")
+        t2 = time.time()
+        cross_results = _run_ragas_evaluation(judge_model="fallback")
+        cross_time = time.time() - t2
+        print(f"      完成 ({cross_time:.1f}s)")
+
+        _, cross_scores = _print_report(cross_results, label="Cross Judge (fallback)")
+
+        if primary_scores and cross_scores:
+            _print_cross_comparison(primary_scores, cross_scores)
+
+    _save_report(primary_scores, cross_scores, passed)
 
     return passed
+
+
+def _print_cross_comparison(primary_scores: dict, cross_scores: dict):
+    """输出 Primary vs Cross Judge 的对比分析。"""
+    print("\n" + "=" * 70)
+    print("  Primary vs Cross Judge 对比分析")
+    print("=" * 70)
+    print(f"\n  {'指标':<30} {'Primary':>10} {'Cross':>10} {'差异':>10}")
+    print("  " + "-" * 62)
+
+    diffs = []
+    for metric in primary_scores:
+        p = primary_scores.get(metric, 0)
+        c = cross_scores.get(metric, 0)
+        diff = p - c
+        diffs.append(abs(diff))
+        diff_str = f"{diff:+.4f}"
+        print(f"  {metric:<30} {p:>10.4f} {c:>10.4f} {diff_str:>10}")
+
+    avg_diff = sum(diffs) / len(diffs) if diffs else 0
+    print(f"\n  平均绝对偏差: {avg_diff:.4f}")
+    if avg_diff < 0.05:
+        print("  [GOOD] 两个 Judge 评分高度一致，评测结果可信")
+    elif avg_diff < 0.15:
+        print("  [OK] 两个 Judge 评分基本一致，差异在可接受范围")
+    else:
+        print("  [WARN] 两个 Judge 评分差异较大，建议检查评测数据质量")
+
+    print("=" * 70)
 
 
 if __name__ == "__main__":
