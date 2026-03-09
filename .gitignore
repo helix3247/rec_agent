@@ -63,4 +63,5 @@ Thumbs.db
 
 .cursor
 .trae
-volumes
+volumes/
+!volumes/elasticsearch-config/

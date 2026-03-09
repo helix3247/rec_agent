@@ -48,7 +48,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─────────────────── Elasticsearch 8.x ───────────────────
+  # ─────────────────── Elasticsearch 9.x + IK 分词器 ───────────────────
   elasticsearch:
     image: elasticsearch:9.3.0
     container_name: rec-elasticsearch
@@ -57,8 +57,8 @@ services:
       - /bin/sh
       - -c
       - |
-        if ! /usr/share/elasticsearch/bin/elasticsearch-plugin list | grep -q "^analysis-ik$"; then
-          /usr/share/elasticsearch/bin/elasticsearch-plugin install --batch analysis-ik;
+        if ! /usr/share/elasticsearch/bin/elasticsearch-plugin list | grep -q "analysis-ik"; then
+          /usr/share/elasticsearch/bin/elasticsearch-plugin install --batch https://get.infini.cloud/elasticsearch/analysis-ik/9.3.0;
         fi
         exec /usr/local/bin/docker-entrypoint.sh
     environment:
@@ -71,11 +71,14 @@ services:
       - "29200:9200"
     volumes:
       - ./volumes/elasticsearch:/usr/share/elasticsearch/data
+      - ./volumes/elasticsearch-plugins:/usr/share/elasticsearch/plugins
+      - ./volumes/elasticsearch-config/synonym.txt:/usr/share/elasticsearch/config/analysis/synonym.txt
     healthcheck:
       test: ["CMD-SHELL", "curl -u elastic:$$ELASTIC_PASSWORD -f http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
+      start_period: 60s
 
   # ─────────────────── Milvus Standalone ───────────────────
   milvus:
