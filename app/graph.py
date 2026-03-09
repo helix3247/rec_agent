@@ -20,6 +20,10 @@ app/graph.py
             response_formatter (全部完成)
 
     --> ResponseFormatter -> Monitor -> END
+
+流式模式:
+    使用 build_pre_formatter_graph() 构建不含 ResponseFormatter 和 Monitor 的子图，
+    在 SSE 端点中手动流式调用润色 + Monitor 上报。
 """
 
 from langgraph.graph import StateGraph, START, END
@@ -43,25 +47,35 @@ def _rag_route(state: AgentState) -> str:
     plan_steps = state.get("plan_steps", [])
     if plan_steps:
         return "planner"
+    return "__end__"
+
+
+def _rag_route_full(state: AgentState) -> str:
+    """RAG 条件边（完整图）：判断是否处于 planner 子任务模式。"""
+    plan_steps = state.get("plan_steps", [])
+    if plan_steps:
+        return "planner"
     return "response_formatter"
 
 
-def build_graph() -> StateGraph:
-    """构建并编译 Agent 工作流图。"""
-    graph = StateGraph(AgentState)
+def _reflect_route_pre(state: AgentState) -> str:
+    """Reflector 条件边（前置图）：通过时到 END 而非 response_formatter。"""
+    result = reflect_route(state)
+    if result == "response_formatter":
+        return "__end__"
+    return result
 
-    graph.add_node("intent_parser", intent_parser_node)
-    graph.add_node("dispatcher", dispatcher_node)
-    graph.add_node("shopping", shopping_node)
-    graph.add_node("dialog", dialog_node)
-    graph.add_node("outfit", outfit_node)
-    graph.add_node("rag", rag_node)
-    graph.add_node("tool_call", tool_call_node)
-    graph.add_node("planner", planner_node)
-    graph.add_node("reflector", reflector_node)
-    graph.add_node("response_formatter", response_formatter_node)
-    graph.add_node("monitor", monitor_node)
 
+def _planner_route_pre(state: AgentState) -> str:
+    """Planner 条件边（前置图）：完成时到 END 而非 response_formatter。"""
+    result = planner_route(state)
+    if result == "response_formatter":
+        return "__end__"
+    return result
+
+
+def _build_common_edges(graph: StateGraph, *, pre_formatter: bool = False):
+    """添加 dispatcher 之后的公共边。pre_formatter=True 时终点为 END 而非 response_formatter。"""
     graph.add_edge(START, "intent_parser")
     graph.add_edge("intent_parser", "dispatcher")
 
@@ -78,50 +92,115 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # shopping / outfit -> reflector（反思检查）
     graph.add_edge("shopping", "reflector")
     graph.add_edge("outfit", "reflector")
 
-    # reflector 条件边：通过/重试/澄清，planner 模式下回到 planner
-    graph.add_conditional_edges(
-        "reflector",
-        reflect_route,
-        {
-            "response_formatter": "response_formatter",
-            "shopping": "shopping",
-            "outfit": "outfit",
-            "dialog": "dialog",
-            "planner": "planner",
-        },
-    )
+    if pre_formatter:
+        graph.add_conditional_edges(
+            "reflector",
+            _reflect_route_pre,
+            {
+                "__end__": END,
+                "shopping": "shopping",
+                "outfit": "outfit",
+                "dialog": "dialog",
+                "planner": "planner",
+            },
+        )
+        graph.add_edge("dialog", END)
+        graph.add_edge("tool_call", END)
 
-    graph.add_edge("dialog", "response_formatter")
-    graph.add_edge("tool_call", "response_formatter")
+        graph.add_conditional_edges(
+            "rag",
+            _rag_route,
+            {"planner": "planner", "__end__": END},
+        )
+        graph.add_conditional_edges(
+            "planner",
+            _planner_route_pre,
+            {
+                "shopping": "shopping",
+                "outfit": "outfit",
+                "rag": "rag",
+                "__end__": END,
+            },
+        )
+    else:
+        graph.add_conditional_edges(
+            "reflector",
+            reflect_route,
+            {
+                "response_formatter": "response_formatter",
+                "shopping": "shopping",
+                "outfit": "outfit",
+                "dialog": "dialog",
+                "planner": "planner",
+            },
+        )
+        graph.add_edge("dialog", "response_formatter")
+        graph.add_edge("tool_call", "response_formatter")
 
-    # rag 条件边：planner 模式下回到 planner，否则直接到 response_formatter
-    graph.add_conditional_edges(
-        "rag",
-        _rag_route,
-        {
-            "planner": "planner",
-            "response_formatter": "response_formatter",
-        },
-    )
+        graph.add_conditional_edges(
+            "rag",
+            _rag_route_full,
+            {"planner": "planner", "response_formatter": "response_formatter"},
+        )
+        graph.add_conditional_edges(
+            "planner",
+            planner_route,
+            {
+                "shopping": "shopping",
+                "outfit": "outfit",
+                "rag": "rag",
+                "response_formatter": "response_formatter",
+            },
+        )
 
-    # planner 条件边：分发子任务或整合结果
-    graph.add_conditional_edges(
-        "planner",
-        planner_route,
-        {
-            "shopping": "shopping",
-            "outfit": "outfit",
-            "rag": "rag",
-            "response_formatter": "response_formatter",
-        },
-    )
+        graph.add_edge("response_formatter", "monitor")
+        graph.add_edge("monitor", END)
 
-    graph.add_edge("response_formatter", "monitor")
-    graph.add_edge("monitor", END)
+
+def build_graph() -> StateGraph:
+    """构建并编译完整的 Agent 工作流图。"""
+    graph = StateGraph(AgentState)
+
+    graph.add_node("intent_parser", intent_parser_node)
+    graph.add_node("dispatcher", dispatcher_node)
+    graph.add_node("shopping", shopping_node)
+    graph.add_node("dialog", dialog_node)
+    graph.add_node("outfit", outfit_node)
+    graph.add_node("rag", rag_node)
+    graph.add_node("tool_call", tool_call_node)
+    graph.add_node("planner", planner_node)
+    graph.add_node("reflector", reflector_node)
+    graph.add_node("response_formatter", response_formatter_node)
+    graph.add_node("monitor", monitor_node)
+
+    _build_common_edges(graph, pre_formatter=False)
+
+    return graph.compile()
+
+
+def build_pre_formatter_graph():
+    """
+    构建前置子图 —— 执行到 ResponseFormatter 之前的所有节点。
+
+    用于流式模式：先通过此子图完成意图解析、路由、业务处理，
+    再在 SSE 端点中手动流式调用 ResponseFormatter 润色。
+    """
+    graph = StateGraph(AgentState)
+
+    graph.add_node("intent_parser", intent_parser_node)
+    graph.add_node("dispatcher", dispatcher_node)
+    graph.add_node("shopping", shopping_node)
+    graph.add_node("dialog", dialog_node)
+    graph.add_node("outfit", outfit_node)
+    graph.add_node("rag", rag_node)
+    graph.add_node("tool_call", tool_call_node)
+    graph.add_node("planner", planner_node)
+    graph.add_node("reflector", reflector_node)
+
+    _build_common_edges(graph, pre_formatter=True)
 
     return graph.compile()
 

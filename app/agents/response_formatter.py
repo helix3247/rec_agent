@@ -1,14 +1,16 @@
 """
 app/agents/response_formatter.py
 ResponseFormatter —— 统一处理各 Agent 输出的语言润色、格式化及相关问题推荐。
+支持流式输出模式，在 SSE 场景下逐 token yield 润色结果。
 """
 
 import re
+from collections.abc import AsyncIterator
 
 from langchain_core.messages import SystemMessage
 
 from app.state import AgentState
-from app.core.agent_routing import invoke_llm_with_routing
+from app.core.agent_routing import invoke_llm_with_routing, stream_llm_with_routing
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, merge_token_usage
 from app.prompts.response_formatter import FORMATTER_SYSTEM_PROMPT, SUGGESTED_QUESTIONS_PROMPT
@@ -54,6 +56,57 @@ async def response_formatter_node(state: AgentState) -> dict:
         state, "ResponseFormatter", t0, token_usage=total_token_usage,
     )
     return {**node_result, **metrics}
+
+
+async def stream_polish_response(state: AgentState) -> AsyncIterator[str]:
+    """流式润色回答：逐 token yield，供 SSE 端点使用。"""
+    trace_id = state.get("trace_id", "-")
+    intent = state.get("user_intent", "")
+    response = state.get("response", "")
+    candidates = state.get("candidates", [])
+    task_status = state.get("task_status", "")
+    log = get_logger(agent_name="ResponseFormatter", trace_id=trace_id)
+
+    if not response or task_status == "clarifying":
+        yield response or ""
+        return
+
+    system_prompt = FORMATTER_SYSTEM_PROMPT.format(
+        intent=intent,
+        raw_response=response,
+        candidates_count=len(candidates),
+    )
+    messages = [
+        SystemMessage(content=system_prompt),
+        SystemMessage(content=f"请润色以下回答：\n\n{response}"),
+    ]
+
+    try:
+        async for token in stream_llm_with_routing(
+            messages, agent_name="ResponseFormatter", log=log, temperature=0.3,
+        ):
+            yield token
+    except Exception as e:
+        log.warning("流式润色失败，回退到原始回答 | error={}", str(e))
+        yield response
+
+
+async def generate_suggested_questions_from_state(state: AgentState) -> list[str]:
+    """从 state 中生成推荐问题（供流式端点在润色完成后调用）。"""
+    intent = state.get("user_intent", "")
+    messages = state.get("messages", [])
+    response = state.get("response", "")
+    candidates = state.get("candidates", [])
+    log = get_logger(agent_name="ResponseFormatter", trace_id=state.get("trace_id", "-"))
+
+    questions, _ = await _generate_suggested_questions(
+        intent=intent,
+        messages=messages,
+        response=response,
+        candidates=candidates,
+        log=log,
+    )
+    return questions
 
 
 async def _polish_response(
