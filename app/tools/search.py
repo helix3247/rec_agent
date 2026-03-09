@@ -3,6 +3,7 @@ app/tools/search.py
 商品检索工具 —— 封装 Elasticsearch Hybrid Search（BM25 + KNN 向量 + 显式 RRF 融合）
 与结构化过滤。集成 IK 中文分词、同义词扩展、可靠性机制。
 """
+from __future__ import annotations
 
 import threading
 import time

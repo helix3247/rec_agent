@@ -13,6 +13,7 @@ from app.state import AgentState
 from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics
+from app.core.security import sanitize_context
 from app.tools.search import search_products
 from app.tools.db import get_user_profile
 from app.tools.personalization import rerank_by_user_profile
@@ -175,7 +176,8 @@ async def shopping_node(state: AgentState) -> dict:
 
     products = rerank_by_user_profile(products, user_profile)
 
-    products_text = _format_products_for_prompt(products)
+    raw_products_text = _format_products_for_prompt(products)
+    products_text = sanitize_context(raw_products_text) if products else raw_products_text
     profile_summary = _format_user_profile_summary(user_profile)
 
     if intent == "compare":

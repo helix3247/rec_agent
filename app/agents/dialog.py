@@ -5,6 +5,18 @@ DialogFlowAgent —— 多轮对话管理。
 - 支持长期记忆迁移：会话结束时将对话摘要写入 Milvus，新会话加载历史偏好。
 - 澄清式对话：当关键槽位缺失时生成追问。
 - 闲聊兜底：处理 chat 意图的一般性对话。
+
+与 checkpoint.py 的职责边界：
+    本模块负责**业务级**对话记忆管理：
+        - Redis 短期历史：跨请求的对话上下文拼接（load_history / save_history）
+        - Redis 槽位积累：跨请求的需求槽位持久化（load_slots / save_slots）
+        - Milvus 长期记忆：会话结束时迁移对话摘要，新会话加载历史偏好
+
+    checkpoint.py 负责**框架级** LangGraph 状态持久化：
+        - 自动保存 Graph 执行过程中每个节点的全量状态快照
+        - 支持进程重启后按 thread_id 恢复中断的 Graph 执行
+
+    两者并行运行：即使 checkpoint 不可用，业务级记忆管理仍正常工作。
 """
 
 import json

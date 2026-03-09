@@ -18,7 +18,8 @@ from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.models.schemas import ChatRequest, ChatResponse, CandidateItem
-from app.graph import app_graph, build_pre_formatter_graph
+from app.graph import app_graph, build_graph, build_pre_formatter_graph
+from app.core.checkpoint import get_checkpointer
 from app.agents.response_formatter import (
     stream_polish_response,
     generate_suggested_questions_from_state,
@@ -32,6 +33,7 @@ from app.agents.dialog import (
 )
 from app.core.logger import get_logger
 from app.core.reliability import idempotency_guard
+from app.core.security import sanitize_user_input, filter_output
 from app.core.langfuse_integration import (
     create_trace,
     get_langfuse_callback,
@@ -39,6 +41,27 @@ from app.core.langfuse_integration import (
 )
 
 router = APIRouter()
+
+_checkpoint_graph = None
+_checkpoint_pre_graph = None
+
+
+async def _get_checkpoint_graph():
+    """延迟初始化带 Checkpoint 持久化的完整 Graph。"""
+    global _checkpoint_graph
+    if _checkpoint_graph is None:
+        checkpointer = await get_checkpointer()
+        _checkpoint_graph = build_graph(checkpointer=checkpointer)
+    return _checkpoint_graph
+
+
+async def _get_checkpoint_pre_graph():
+    """延迟初始化带 Checkpoint 持久化的前置 Graph（流式模式用）。"""
+    global _checkpoint_pre_graph
+    if _checkpoint_pre_graph is None:
+        checkpointer = await get_checkpointer()
+        _checkpoint_pre_graph = build_pre_formatter_graph(checkpointer=checkpointer)
+    return _checkpoint_pre_graph
 
 
 def _build_initial_state(
@@ -97,13 +120,22 @@ async def chat(request: ChatRequest):
 
     log.info("收到请求 | query={} | thread_id={} | new_session={}", request.query, thread_id, is_new_session)
 
+    sanitized = sanitize_user_input(request.query)
+    if sanitized.injection_detected:
+        log.warning(
+            "输入安全过滤 | injection_detected=True | patterns={}",
+            sanitized.matched_patterns,
+        )
+    safe_query = sanitized.text
+    safe_request = request.model_copy(update={"query": safe_query})
+
     # 创建 Langfuse Trace
     create_trace(
         trace_id=trace_id,
         name="rec-agent-chat",
         user_id=user_id,
         session_id=thread_id,
-        metadata={"query": request.query, "is_new_session": is_new_session},
+        metadata={"query": safe_query, "is_new_session": is_new_session},
         tags=["chat"],
     )
     langfuse_callback = get_langfuse_callback(
@@ -112,28 +144,39 @@ async def chat(request: ChatRequest):
         session_id=thread_id,
     )
 
-    initial_state = _build_initial_state(request, trace_id, thread_id, user_id, is_new_session, log)
+    initial_state = _build_initial_state(safe_request, trace_id, thread_id, user_id, is_new_session, log)
 
     # 幂等保护：相同会话内相同查询不重复处理
     # 使用 thread_id 作为幂等键的 scope（而非每次变化的 trace_id），确保缓存能命中
-    params_hash = hashlib.md5(f"{thread_id}:{request.query}".encode()).hexdigest()
+    params_hash = hashlib.md5(f"{thread_id}:{safe_query}".encode()).hexdigest()
     is_dup, cached = idempotency_guard.check_and_set(thread_id, "graph_invoke", params_hash)
     if is_dup and cached:
         log.info("幂等命中，返回缓存结果 | trace_id={}", trace_id)
         return cached
 
-    invoke_config = {}
+    invoke_config = {"configurable": {"thread_id": thread_id}}
     if langfuse_callback:
         invoke_config["callbacks"] = [langfuse_callback]
 
-    result = await app_graph.ainvoke(initial_state, config=invoke_config)
+    try:
+        graph = await _get_checkpoint_graph()
+    except Exception as e:
+        log.warning("Checkpoint Graph 初始化失败，降级到无持久化模式 | error={}", str(e))
+        graph = app_graph
+
+    result = await graph.ainvoke(initial_state, config=invoke_config)
 
     candidates = [
         CandidateItem(**c) for c in result.get("candidates", [])
     ]
 
+    filtered = filter_output(result.get("response", ""))
+    if filtered.is_modified:
+        log.info("输出安全过滤 | ad_law={} | disparage={}",
+                 filtered.ad_law_violations, filtered.competitor_disparage_detected)
+
     response = ChatResponse(
-        response=result.get("response", ""),
+        response=filtered.text,
         trace_id=trace_id,
         thread_id=thread_id,
         suggested_questions=result.get("suggested_questions", []),
@@ -170,12 +213,21 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
 
     log.info("收到流式请求 | query={} | thread_id={} | new_session={}", request.query, thread_id, is_new_session)
 
+    sanitized = sanitize_user_input(request.query)
+    if sanitized.injection_detected:
+        log.warning(
+            "输入安全过滤 | injection_detected=True | patterns={}",
+            sanitized.matched_patterns,
+        )
+    safe_query = sanitized.text
+    safe_request = request.model_copy(update={"query": safe_query})
+
     create_trace(
         trace_id=trace_id,
         name="rec-agent-chat-stream",
         user_id=user_id,
         session_id=thread_id,
-        metadata={"query": request.query, "is_new_session": is_new_session, "mode": "stream"},
+        metadata={"query": safe_query, "is_new_session": is_new_session, "mode": "stream"},
         tags=["chat", "stream"],
     )
     langfuse_callback = get_langfuse_callback(
@@ -184,18 +236,21 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
         session_id=thread_id,
     )
 
-    initial_state = _build_initial_state(request, trace_id, thread_id, user_id, is_new_session, log)
+    initial_state = _build_initial_state(safe_request, trace_id, thread_id, user_id, is_new_session, log)
 
     async def _event_generator():
         """SSE 事件生成器：先跑前置 Graph 节点，再流式润色，最后生成推荐问题。"""
         pre_result = None
         try:
-            invoke_config = {}
+            invoke_config = {"configurable": {"thread_id": thread_id}}
             if langfuse_callback:
                 invoke_config["callbacks"] = [langfuse_callback]
 
             # Phase 1: 执行前置节点（intent_parser -> dispatcher -> 业务 agent -> reflector）
-            pre_graph = build_pre_formatter_graph()
+            try:
+                pre_graph = await _get_checkpoint_pre_graph()
+            except Exception:
+                pre_graph = build_pre_formatter_graph()
             pre_result = await pre_graph.ainvoke(initial_state, config=invoke_config)
 
             # 检查客户端是否已断开
@@ -208,12 +263,21 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
             if candidates:
                 yield _sse_event("candidates", {"items": candidates})
 
-            # Phase 3: 流式润色回答
+            # Phase 3: 流式润色回答（累积全文后做输出过滤）
+            accumulated_text = ""
             async for token in stream_polish_response(pre_result):
                 if await raw_request.is_disconnected():
                     log.info("客户端已断开，终止流式输出")
                     return
+                accumulated_text += token
                 yield _sse_event("token", {"content": token})
+
+            # Phase 3.5: 输出安全过滤（若触发，发送替换事件）
+            filtered = filter_output(accumulated_text)
+            if filtered.is_modified:
+                log.info("流式输出安全过滤 | ad_law={} | disparage={}",
+                         filtered.ad_law_violations, filtered.competitor_disparage_detected)
+                yield _sse_event("replace", {"content": filtered.text})
 
             # Phase 4: 生成推荐问题
             suggested_questions = await generate_suggested_questions_from_state(pre_result)

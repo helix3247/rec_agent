@@ -10,6 +10,7 @@ from app.state import AgentState
 from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics
+from app.core.security import sanitize_context
 from app.tools.knowledge import query_knowledge
 from app.tools.db import get_product_by_id, list_favorites
 from app.prompts.rag import RAG_SYSTEM_PROMPT
@@ -103,10 +104,11 @@ async def rag_node(state: AgentState) -> dict:
         chunks = []
         tool_calls_log.append({"tool_name": "query_knowledge", "success": False, "error": str(e)})
 
+    raw_chunks_text = _format_chunks(chunks)
     system_prompt = RAG_SYSTEM_PROMPT.format(
         query=query,
         product_info=_format_product_info(product_info),
-        knowledge_chunks=_format_chunks(chunks),
+        knowledge_chunks=sanitize_context(raw_chunks_text) if chunks else raw_chunks_text,
     )
 
     node_success = True

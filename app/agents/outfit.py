@@ -14,6 +14,7 @@ from app.state import AgentState
 from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics
+from app.core.security import sanitize_context
 from app.tools.search import search_products
 from app.tools.db import get_user_profile
 from app.tools.personalization import rerank_by_user_profile
@@ -160,7 +161,8 @@ async def outfit_node(state: AgentState) -> dict:
                 category_results[cat_name] = []
                 tool_calls_log.append({"tool_name": f"search_{cat_name}", "success": False, "error": str(e)})
 
-    category_products_text = _format_category_products(category_results)
+    raw_category_text = _format_category_products(category_results)
+    category_products_text = sanitize_context(raw_category_text) if category_results else raw_category_text
     system_prompt = OUTFIT_SYSTEM_PROMPT.format(
         query=query, scenario=scenario or "未指定",
         style=style or "未指定", budget=budget or "不限",

@@ -24,8 +24,15 @@ app/graph.py
 流式模式:
     使用 build_pre_formatter_graph() 构建不含 ResponseFormatter 和 Monitor 的子图，
     在 SSE 端点中手动流式调用润色 + Monitor 上报。
+
+Checkpoint 持久化:
+    支持传入 AsyncRedisSaver 作为 checkpointer，实现 Graph 状态自动持久化。
+    通过 config={"configurable": {"thread_id": "..."}} 按会话恢复状态。
 """
 
+from typing import Optional
+
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph, START, END
 
 from app.state import AgentState
@@ -160,8 +167,14 @@ def _build_common_edges(graph: StateGraph, *, pre_formatter: bool = False):
         graph.add_edge("monitor", END)
 
 
-def build_graph() -> StateGraph:
-    """构建并编译完整的 Agent 工作流图。"""
+def build_graph(checkpointer: Optional[BaseCheckpointSaver] = None) -> StateGraph:
+    """
+    构建并编译完整的 Agent 工作流图。
+
+    Args:
+        checkpointer: 可选的 checkpoint 持久化后端。传入后 Graph 会在每个节点
+                      执行后自动保存状态快照，支持按 thread_id 恢复。
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("intent_parser", intent_parser_node)
@@ -178,15 +191,18 @@ def build_graph() -> StateGraph:
 
     _build_common_edges(graph, pre_formatter=False)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
-def build_pre_formatter_graph():
+def build_pre_formatter_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
     """
     构建前置子图 —— 执行到 ResponseFormatter 之前的所有节点。
 
     用于流式模式：先通过此子图完成意图解析、路由、业务处理，
     再在 SSE 端点中手动流式调用 ResponseFormatter 润色。
+
+    Args:
+        checkpointer: 可选的 checkpoint 持久化后端。
     """
     graph = StateGraph(AgentState)
 
@@ -202,7 +218,7 @@ def build_pre_formatter_graph():
 
     _build_common_edges(graph, pre_formatter=True)
 
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 app_graph = build_graph()

@@ -17,6 +17,7 @@ from app.state import AgentState
 from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics
+from app.core.security import sanitize_context
 from app.tools.db import query_order_status
 from app.prompts.tool_call import TOOL_CALL_SYSTEM_PROMPT
 
@@ -159,7 +160,8 @@ async def tool_call_node(state: AgentState) -> dict:
     token_usage: dict[str, int] = {}
     tool_result, tool_calls_log = _execute_tool(route.tool_type, user_id, query, log)
 
-    system_prompt = TOOL_CALL_SYSTEM_PROMPT.format(query=query, tool_result=tool_result)
+    safe_tool_result = sanitize_context(tool_result) if tool_result else tool_result
+    system_prompt = TOOL_CALL_SYSTEM_PROMPT.format(query=query, tool_result=safe_tool_result)
 
     node_success = True
     node_error = ""

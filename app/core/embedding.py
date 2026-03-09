@@ -6,6 +6,8 @@ app/core/embedding.py
 同时复用 OpenAI 客户端避免每次调用都新建连接。
 """
 
+from __future__ import annotations
+
 import threading
 
 from openai import OpenAI
