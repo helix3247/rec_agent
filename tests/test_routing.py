@@ -91,6 +91,7 @@ ROUTE_CASES = [
 ]
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ROUTE_CASES, ids=[c["query"][:20] for c in ROUTE_CASES])
 async def test_e2e_routing(case):

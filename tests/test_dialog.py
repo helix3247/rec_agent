@@ -19,6 +19,7 @@ from app.core.logger import get_logger
 log = get_logger(agent_name="TestDialog", trace_id="test-dialog")
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_clarification_flow():
     """
@@ -40,6 +41,7 @@ async def test_clarification_flow():
     assert response, "Response should not be empty"
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_chat_flow():
     """
@@ -60,6 +62,7 @@ async def test_chat_flow():
     assert response, "Response should not be empty"
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_multi_turn_slot_filling():
     """
