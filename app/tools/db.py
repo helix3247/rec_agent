@@ -7,6 +7,9 @@ app/tools/db.py
     - 集成 CircuitBreaker 熔断保护（连续 3 次失败进入 60s 冷却）
     - 集成 retry_with_backoff 重试（最多 2 次，指数退避）
     - 同步超时控制（单次查询 5 秒超时）
+
+缓存增强:
+    - 用户画像查询结果通过 Redis 缓存（TTL 5 分钟），减少 MySQL 压力
 """
 
 import json
@@ -18,6 +21,7 @@ import pymysql.cursors
 from app.core.config import settings
 from app.core.logger import get_logger
 from app.core.reliability import CircuitBreaker, sync_timeout_call
+from app.core.cache import get_cached_profile, set_cached_profile
 
 _logger = get_logger(agent_name="DBTool")
 
@@ -82,11 +86,19 @@ def get_user_profile(user_id: str) -> Optional[dict]:
     """
     获取用户画像：基础信息 + 历史行为偏好。
 
+    优先从 Redis 缓存读取（TTL 5 分钟），缓存未命中时查询 MySQL 并回写缓存。
+    缓存层不可用时透明降级为直查 MySQL。
+
     Returns:
         用户画像字典，若用户不存在或查询失败则返回 None。
     """
     if not user_id:
         return None
+
+    cached = get_cached_profile(user_id)
+    if cached is not None:
+        _logger.debug("画像缓存命中 | user_id={}", user_id)
+        return cached
 
     def _query():
         conn = _get_connection()
@@ -157,7 +169,10 @@ def get_user_profile(user_id: str) -> Optional[dict]:
             conn.close()
 
     try:
-        return _retry_query(_query)
+        profile = _retry_query(_query)
+        if profile is not None:
+            set_cached_profile(user_id, profile)
+        return profile
     except Exception as e:
         _logger.error("用户画像查询失败 | user_id={} | error={}", user_id, str(e))
         return None

@@ -141,6 +141,7 @@ def report_trace_metrics(
     token_usage: dict[str, int] | None = None,
     tool_call_stats: dict[str, Any] | None = None,
     task_status: str = "",
+    cache_stats: dict[str, dict] | None = None,
 ):
     """
     向已有 Trace 追加汇总指标信息（作为 event）。
@@ -162,9 +163,9 @@ def report_trace_metrics(
                 "token_usage": token_usage or {},
                 "tool_call_stats": tool_call_stats or {},
                 "task_status": task_status,
+                "cache_hit_rate": cache_stats or {},
             },
         )
-        # 设置 token 级别的 usage 供 Langfuse 面板展示
         if token_usage:
             trace.update(
                 metadata={

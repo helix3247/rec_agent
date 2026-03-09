@@ -16,6 +16,7 @@ from app.state import AgentState
 from app.core.llm import get_model_router
 from app.core.logger import get_logger
 from app.core.langfuse_integration import report_trace_metrics
+from app.core.cache import get_all_cache_stats
 
 
 def _calc_tool_call_stats(node_metrics: list[dict]) -> dict[str, Any]:
@@ -106,6 +107,9 @@ def monitor_node(state: AgentState) -> dict:
     router = get_model_router()
     model_routing = router.get_health_report()
 
+    # 汇总缓存命中率
+    cache_stats = get_all_cache_stats()
+
     trace_report = {
         "trace_id": trace_id,
         "thread_id": state.get("thread_id", "-"),
@@ -123,6 +127,7 @@ def monitor_node(state: AgentState) -> dict:
         },
         "model_routing": model_routing,
         "node_latency_breakdown": node_breakdown,
+        "cache_hit_rate": cache_stats,
     }
 
     log.info("TRACE_REPORT | {}", json.dumps(trace_report, ensure_ascii=False))
@@ -177,6 +182,7 @@ def monitor_node(state: AgentState) -> dict:
             "success_rate": tool_stats["success_rate"],
         },
         task_status=state.get("task_status", ""),
+        cache_stats=cache_stats,
     )
 
     return {"current_agent": "MonitorAgent"}
