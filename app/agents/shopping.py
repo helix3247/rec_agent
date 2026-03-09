@@ -10,9 +10,9 @@ import re
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm, get_model_router
+from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
-from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
+from app.core.metrics import start_node_timer, record_node_metrics
 from app.tools.search import search_products
 from app.tools.db import get_user_profile
 from app.tools.personalization import rerank_by_user_profile
@@ -100,7 +100,7 @@ def _build_candidates(products: list[dict], max_count: int = 5) -> list[dict]:
     return candidates
 
 
-def shopping_node(state: AgentState) -> dict:
+async def shopping_node(state: AgentState) -> dict:
     """ShoppingAgent 节点：调用检索工具 -> 个性化排序 -> LLM 生成推荐。"""
     t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
@@ -193,30 +193,16 @@ def shopping_node(state: AgentState) -> dict:
 
     node_success = True
     node_error = ""
-    router = get_model_router()
-    complexity = router.classify_complexity(agent_name="ShoppingAgent")
-    preferred = router.select_model(complexity)
-    fallback_type = "fallback" if preferred == "primary" else "primary"
-    log.info("智能路由 | complexity={} | model={}", complexity.value, preferred)
+    llm_messages = [SystemMessage(content=system_prompt)] + messages
 
     try:
-        llm = get_llm(preferred)
-        llm_messages = [SystemMessage(content=system_prompt)] + messages
-        response = llm.invoke(llm_messages)
-        reply = response.content
-        token_usage = extract_token_usage(response)
-    except Exception as e:
-        log.warning("首选模型调用失败，降级使用 {} | error={}", fallback_type, str(e))
-        try:
-            llm = get_llm(fallback_type)
-            llm_messages = [SystemMessage(content=system_prompt)] + messages
-            response = llm.invoke(llm_messages)
-            reply = response.content
-            token_usage = extract_token_usage(response)
-        except Exception as fe:
-            reply = _build_fallback_response(products)
-            node_success = False
-            node_error = str(fe)
+        reply, token_usage = await invoke_llm_with_routing(
+            llm_messages, agent_name="ShoppingAgent", log=log,
+        )
+    except Exception as fe:
+        reply = _build_fallback_response(products)
+        node_success = False
+        node_error = str(fe)
 
     candidates = _build_candidates(products)
 

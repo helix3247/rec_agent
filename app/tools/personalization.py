@@ -57,7 +57,7 @@ def rerank_by_user_profile(
 
     if not user_profile:
         _logger.info("无用户画像，使用默认排序")
-        return products
+        return list(products)
 
     liked_brands = set(user_profile.get("liked_brands", []))
     liked_categories = set(user_profile.get("liked_categories", []))
@@ -65,11 +65,11 @@ def rerank_by_user_profile(
     budget_level = user_profile.get("budget_level", "mid")
     price_range = user_profile.get("price_range", {})
 
-    # 从购买历史获取已购品类（用于互补推荐）
     purchased_categories = set()
     for p in user_profile.get("purchase_history", []):
         purchased_categories.add(p.get("category", ""))
 
+    scored: list[tuple[float, dict]] = []
     for product in products:
         original_score = product.get("score", 0)
         boost = 0.0
@@ -78,44 +78,34 @@ def rerank_by_user_profile(
         category = product.get("category", "")
         price = product.get("price", 0)
 
-        # 品牌偏好加分
         if brand in liked_brands:
             boost += 2.0
 
-        # 品类偏好加分
         if category in liked_categories or category in category_interests:
             boost += 1.5
 
-        # 价格区间匹配加分
         budget_range = _BUDGET_LEVEL_RANGES.get(budget_level, (0, float("inf")))
         if budget_range[0] <= price <= budget_range[1]:
             boost += 1.0
 
-        # 与用户历史平均消费水平的匹配度
         avg_price = price_range.get("avg", 0)
         if avg_price > 0 and price > 0:
             price_ratio = min(price, avg_price) / max(price, avg_price)
             boost += price_ratio * 0.5
 
-        # 品类互补性加分
         for purchased_cat in purchased_categories:
             complementary = _COMPLEMENTARY_CATEGORIES.get(purchased_cat, [])
             if category in complementary:
                 boost += 1.0
                 break
 
-        product["_personalization_boost"] = round(boost, 2)
-        product["_final_score"] = round(original_score + boost, 4)
+        final_score = round(original_score + boost, 4)
+        scored.append((final_score, product))
 
-    products.sort(key=lambda x: x.get("_final_score", 0), reverse=True)
-
-    # 清理内部字段
-    for product in products:
-        product.pop("_personalization_boost", None)
-        product.pop("_final_score", None)
+    scored.sort(key=lambda x: x[0], reverse=True)
 
     _logger.info(
         "个性化排序完成 | products={} | brand_prefs={} | budget_level={}",
         len(products), len(liked_brands), budget_level,
     )
-    return products
+    return [product for _, product in scored]

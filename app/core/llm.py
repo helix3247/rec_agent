@@ -129,98 +129,74 @@ def invoke_with_smart_routing_sync(
     )
 
 
+def _invoke_with_fallback_core(messages: list, *, is_async: bool, **kwargs):
+    """
+    带降级能力的 LLM 调用核心逻辑。
+
+    返回协程（is_async=True）或直接结果（is_async=False）。
+    将 primary -> fallback 的双层 try/except 提取为统一流程。
+    """
+    model_order: list[ModelType] = ["primary", "fallback"]
+    model_names = {
+        "primary": settings.llm.llm_model,
+        "fallback": settings.llm.fallback_llm_model,
+    }
+
+    if is_async:
+        async def _run():
+            last_err: Exception | None = None
+            for model_type in model_order:
+                t0 = time.time()
+                try:
+                    llm = get_llm(model_type, **kwargs)
+                    response = await llm.ainvoke(messages)
+                    latency_ms = (time.time() - t0) * 1000
+                    _record_to_router(model_type, True, latency_ms)
+                    _logger.info(
+                        "LLM 调用成功 | model={} | latency={}ms",
+                        model_names[model_type], round(latency_ms),
+                    )
+                    return response.content
+                except Exception as e:
+                    latency_ms = (time.time() - t0) * 1000
+                    _record_to_router(model_type, False, latency_ms)
+                    _logger.warning(
+                        "LLM 调用失败 | model={} | error={}",
+                        model_names[model_type], str(e),
+                    )
+                    last_err = e
+            raise last_err  # type: ignore[misc]
+        return _run()
+    else:
+        last_err: Exception | None = None
+        for model_type in model_order:
+            t0 = time.time()
+            try:
+                llm = get_llm(model_type, **kwargs)
+                response = llm.invoke(messages)
+                latency_ms = (time.time() - t0) * 1000
+                _record_to_router(model_type, True, latency_ms)
+                _logger.info(
+                    "LLM 调用成功 | model={} | latency={}ms",
+                    model_names[model_type], round(latency_ms),
+                )
+                return response.content
+            except Exception as e:
+                latency_ms = (time.time() - t0) * 1000
+                _record_to_router(model_type, False, latency_ms)
+                _logger.warning(
+                    "LLM 调用失败 | model={} | error={}",
+                    model_names[model_type], str(e),
+                )
+                last_err = e
+        raise last_err  # type: ignore[misc]
+
+
 async def invoke_with_fallback(messages: list, **kwargs) -> str:
-    """
-    带降级能力的 LLM 调用：先尝试主模型，失败后自动切换到 fallback。
-
-    Args:
-        messages: LangChain 消息列表。
-        **kwargs: 传递给 ChatOpenAI 的额外参数。
-
-    Returns:
-        LLM 生成的文本内容。
-    """
-    t0 = time.time()
-    try:
-        llm = get_llm("primary", **kwargs)
-        response = await llm.ainvoke(messages)
-        latency_ms = (time.time() - t0) * 1000
-        _record_to_router("primary", True, latency_ms)
-        _logger.info(
-            "主模型调用成功 | model={} | latency={}ms",
-            settings.llm.llm_model, round(latency_ms),
-        )
-        return response.content
-    except Exception as e:
-        latency_ms = (time.time() - t0) * 1000
-        _record_to_router("primary", False, latency_ms)
-        _logger.warning(
-            "主模型调用失败，准备降级 | model={} | error={}",
-            settings.llm.llm_model,
-            str(e),
-        )
-        t1 = time.time()
-        try:
-            llm_fallback = get_llm("fallback", **kwargs)
-            response = await llm_fallback.ainvoke(messages)
-            latency_ms = (time.time() - t1) * 1000
-            _record_to_router("fallback", True, latency_ms)
-            _logger.info(
-                "降级成功，使用备用模型 | model={} | latency={}ms",
-                settings.llm.fallback_llm_model, round(latency_ms),
-            )
-            return response.content
-        except Exception as fallback_err:
-            latency_ms = (time.time() - t1) * 1000
-            _record_to_router("fallback", False, latency_ms)
-            _logger.error(
-                "备用模型也失败 | model={} | error={}",
-                settings.llm.fallback_llm_model,
-                str(fallback_err),
-            )
-            raise
+    """带降级能力的 LLM 异步调用：先尝试主模型，失败后自动切换到 fallback。"""
+    return await _invoke_with_fallback_core(messages, is_async=True, **kwargs)
 
 
 def invoke_with_fallback_sync(messages: list, **kwargs) -> str:
-    """
-    同步版本的带降级 LLM 调用。
-    """
-    t0 = time.time()
-    try:
-        llm = get_llm("primary", **kwargs)
-        response = llm.invoke(messages)
-        latency_ms = (time.time() - t0) * 1000
-        _record_to_router("primary", True, latency_ms)
-        _logger.info(
-            "主模型调用成功 | model={} | latency={}ms",
-            settings.llm.llm_model, round(latency_ms),
-        )
-        return response.content
-    except Exception as e:
-        latency_ms = (time.time() - t0) * 1000
-        _record_to_router("primary", False, latency_ms)
-        _logger.warning(
-            "主模型调用失败，准备降级 | model={} | error={}",
-            settings.llm.llm_model,
-            str(e),
-        )
-        t1 = time.time()
-        try:
-            llm_fallback = get_llm("fallback", **kwargs)
-            response = llm_fallback.invoke(messages)
-            latency_ms = (time.time() - t1) * 1000
-            _record_to_router("fallback", True, latency_ms)
-            _logger.info(
-                "降级成功，使用备用模型 | model={} | latency={}ms",
-                settings.llm.fallback_llm_model, round(latency_ms),
-            )
-            return response.content
-        except Exception as fallback_err:
-            latency_ms = (time.time() - t1) * 1000
-            _record_to_router("fallback", False, latency_ms)
-            _logger.error(
-                "备用模型也失败 | model={} | error={}",
-                settings.llm.fallback_llm_model,
-                str(fallback_err),
-            )
-            raise
+    """带降级能力的 LLM 同步调用：先尝试主模型，失败后自动切换到 fallback。"""
+    return _invoke_with_fallback_core(messages, is_async=False, **kwargs)

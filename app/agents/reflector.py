@@ -14,9 +14,10 @@ import re
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm, invoke_with_smart_routing_sync, get_model_router
+from app.core.agent_routing import invoke_llm_with_routing
+from app.core.llm import invoke_with_smart_routing
 from app.core.logger import get_logger
-from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
+from app.core.metrics import start_node_timer, record_node_metrics
 from app.prompts.reflector import REFLECTOR_SYSTEM_PROMPT, REFLECTOR_BUDGET_ADVICE_PROMPT
 
 MAX_RETRIES = 3
@@ -71,7 +72,7 @@ def _check_basic_issues(
     return None
 
 
-def _generate_budget_advice(
+async def _generate_budget_advice(
     slots: dict,
     log,
 ) -> str:
@@ -85,7 +86,7 @@ def _generate_budget_advice(
     )
 
     try:
-        return invoke_with_smart_routing_sync(
+        return await invoke_with_smart_routing(
             [SystemMessage(content=prompt)],
             agent_name="Reflector",
             temperature=0.5,
@@ -98,7 +99,7 @@ def _generate_budget_advice(
         )
 
 
-def reflector_node(state: AgentState) -> dict:
+async def reflector_node(state: AgentState) -> dict:
     """
     Reflector 反思节点。
 
@@ -148,14 +149,11 @@ def reflector_node(state: AgentState) -> dict:
         )
 
         try:
-            router = get_model_router()
-            complexity = router.classify_complexity(agent_name="Reflector")
-            model_type = router.select_model(complexity)
-            log.info("智能路由 | complexity={} | model={}", complexity.value, model_type)
-            llm = get_llm(model_type, temperature=0.1)
-            llm_result = llm.invoke([SystemMessage(content=system_prompt)])
-            token_usage = extract_token_usage(llm_result)
-            reflection = _extract_json(llm_result.content)
+            content, token_usage = await invoke_llm_with_routing(
+                [SystemMessage(content=system_prompt)],
+                agent_name="Reflector", log=log, temperature=0.1,
+            )
+            reflection = _extract_json(content)
             log.info(
                 "LLM 反思结果 | passed={} | strategy={}",
                 reflection.get("passed"), reflection.get("strategy"),
@@ -189,7 +187,7 @@ def reflector_node(state: AgentState) -> dict:
 
     if strategy == "adjust_budget":
         log.info("需求不合理，生成预算调整建议")
-        advice = _generate_budget_advice(slots, log)
+        advice = await _generate_budget_advice(slots, log)
         node_result = {
             "current_agent": "Reflector",
             "task_status": "completed",

@@ -4,24 +4,30 @@ app/tools/knowledge.py
 集成可靠性机制：熔断保护。
 """
 
+import threading
 from typing import Optional
 
-from openai import OpenAI
 from pymilvus import Collection, connections
 
 from app.core.config import settings
+from app.core.embedding import get_embedding
 from app.core.logger import get_logger
 from app.core.reliability import milvus_circuit_breaker
 
 _logger = get_logger(agent_name="KnowledgeTool")
 
 _connected = False
+_connection_lock = threading.Lock()
 
 
 def _ensure_connection():
-    """确保 Milvus 连接已建立。"""
+    """确保 Milvus 连接已建立（线程安全）。"""
     global _connected
-    if not _connected:
+    if _connected:
+        return
+    with _connection_lock:
+        if _connected:
+            return
         milvus_cfg = settings.milvus
         connections.connect(
             alias="default",
@@ -32,17 +38,8 @@ def _ensure_connection():
 
 
 def _get_embedding(text: str) -> list[float]:
-    """调用 Embedding 模型获取向量表示。"""
-    emb_cfg = settings.embedding
-    client = OpenAI(
-        api_key=emb_cfg.embedding_api_key or "dummy",
-        base_url=emb_cfg.embedding_base_url,
-    )
-    response = client.embeddings.create(
-        model=emb_cfg.embedding_model,
-        input=[text],
-    )
-    return response.data[0].embedding
+    """调用 Embedding 模型获取向量表示（委托给统一的 embedding 模块）。"""
+    return get_embedding(text)
 
 
 def query_knowledge(

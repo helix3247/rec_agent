@@ -91,8 +91,9 @@ async def chat(request: ChatRequest):
     }
 
     # 幂等保护：相同会话内相同查询不重复处理
+    # 使用 thread_id 作为幂等键的 scope（而非每次变化的 trace_id），确保缓存能命中
     params_hash = hashlib.md5(f"{thread_id}:{request.query}".encode()).hexdigest()
-    is_dup, cached = idempotency_guard.check_and_set(trace_id, "graph_invoke", params_hash)
+    is_dup, cached = idempotency_guard.check_and_set(thread_id, "graph_invoke", params_hash)
     if is_dup and cached:
         log.info("幂等命中，返回缓存结果 | trace_id={}", trace_id)
         return cached
@@ -115,8 +116,8 @@ async def chat(request: ChatRequest):
         candidates=candidates,
     )
 
-    # 缓存结果用于幂等保护
-    idempotency_guard.check_and_set(trace_id, "graph_invoke", params_hash, response)
+    # 缓存结果用于幂等保护（scope 与查询时一致，使用 thread_id）
+    idempotency_guard.check_and_set(thread_id, "graph_invoke", params_hash, response)
 
     log.info("请求处理完成 | status={}", result.get("task_status", "-"))
 

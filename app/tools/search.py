@@ -4,10 +4,10 @@ app/tools/search.py
 集成可靠性机制：超时控制、熔断保护、重试。
 """
 
+import threading
 import time
 from typing import Optional
 
-from openai import OpenAI
 from elasticsearch import (
     ConnectionError as ESConnectionError,
     ConnectionTimeout,
@@ -16,6 +16,7 @@ from elasticsearch import (
 )
 
 from app.core.config import settings
+from app.core.embedding import get_embedding
 from app.core.logger import get_logger
 from app.core.reliability import (
     es_circuit_breaker,
@@ -26,34 +27,35 @@ _TRANSIENT_ES_EXCEPTIONS = (ESConnectionError, ConnectionTimeout, TimeoutError, 
 
 _logger = get_logger(agent_name="SearchTool")
 
+_es_client: Elasticsearch | None = None
+_es_client_lock = threading.Lock()
+
 
 def _get_es_client() -> Elasticsearch:
-    """获取 Elasticsearch 客户端实例。"""
-    es_cfg = settings.es
-    es_kwargs: dict = {"hosts": es_cfg.es_host}
+    """获取全局单例 Elasticsearch 客户端（线程安全，复用连接池）。"""
+    global _es_client
+    if _es_client is not None:
+        return _es_client
+    with _es_client_lock:
+        if _es_client is not None:
+            return _es_client
+        es_cfg = settings.es
+        es_kwargs: dict = {"hosts": es_cfg.es_host}
 
-    if es_cfg.es_host.startswith("https"):
-        es_kwargs["verify_certs"] = False
-        es_kwargs["ssl_show_warn"] = False
+        if es_cfg.es_host.startswith("https"):
+            es_kwargs["verify_certs"] = False
+            es_kwargs["ssl_show_warn"] = False
 
-    if es_cfg.es_username and es_cfg.es_password:
-        es_kwargs["basic_auth"] = (es_cfg.es_username, es_cfg.es_password)
+        if es_cfg.es_username and es_cfg.es_password:
+            es_kwargs["basic_auth"] = (es_cfg.es_username, es_cfg.es_password)
 
-    return Elasticsearch(**es_kwargs)
+        _es_client = Elasticsearch(**es_kwargs)
+        return _es_client
 
 
 def _get_embedding(text: str) -> list[float]:
-    """调用 Embedding 模型获取向量表示。"""
-    emb_cfg = settings.embedding
-    client = OpenAI(
-        api_key=emb_cfg.embedding_api_key or "dummy",
-        base_url=emb_cfg.embedding_base_url,
-    )
-    response = client.embeddings.create(
-        model=emb_cfg.embedding_model,
-        input=[text],
-    )
-    return response.data[0].embedding
+    """调用 Embedding 模型获取向量表示（委托给统一的 embedding 模块）。"""
+    return get_embedding(text)
 
 
 def search_products(

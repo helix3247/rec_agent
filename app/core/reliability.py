@@ -236,7 +236,7 @@ class CircuitBreaker:
     状态机: CLOSED -> OPEN -> HALF_OPEN -> CLOSED/OPEN
         - CLOSED: 正常通过请求
         - OPEN: 快速失败（错误率超过阈值后触发）
-        - HALF_OPEN: 冷却后允许试探性通过一个请求
+        - HALF_OPEN: 冷却后仅放行单个探测请求，成功则切回 CLOSED，失败则回到 OPEN
     """
 
     CLOSED = "closed"
@@ -255,6 +255,7 @@ class CircuitBreaker:
         self._state = self.CLOSED
         self._failure_count = 0
         self._last_failure_time = 0.0
+        self._half_open_permitted = False
         self._lock = threading.Lock()
 
     @property
@@ -263,28 +264,46 @@ class CircuitBreaker:
             if self._state == self.OPEN:
                 if time.time() - self._last_failure_time >= self._recovery_timeout:
                     self._state = self.HALF_OPEN
+                    self._half_open_permitted = True
             return self._state
 
     def allow_request(self) -> bool:
-        """检查是否允许通过请求。"""
-        current = self.state
-        if current == self.CLOSED:
-            return True
-        if current == self.HALF_OPEN:
-            return True
-        _logger.warning("熔断器 [{}] 开启，拒绝请求", self.name)
-        return False
+        """检查是否允许通过请求。HALF_OPEN 状态下仅放行一个探测请求。"""
+        with self._lock:
+            if self._state == self.OPEN:
+                if time.time() - self._last_failure_time >= self._recovery_timeout:
+                    self._state = self.HALF_OPEN
+                    self._half_open_permitted = True
+
+            if self._state == self.CLOSED:
+                return True
+
+            if self._state == self.HALF_OPEN:
+                if self._half_open_permitted:
+                    self._half_open_permitted = False
+                    return True
+                _logger.debug("熔断器 [{}] HALF_OPEN 已有探测请求，拒绝额外请求", self.name)
+                return False
+
+            _logger.warning("熔断器 [{}] 开启，拒绝请求", self.name)
+            return False
 
     def record_success(self):
         with self._lock:
             self._failure_count = 0
             self._state = self.CLOSED
+            self._half_open_permitted = False
 
     def record_failure(self):
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.time()
-            if self._failure_count >= self._failure_threshold:
+            if self._state == self.HALF_OPEN:
+                self._state = self.OPEN
+                _logger.warning(
+                    "熔断器 [{}] HALF_OPEN 探测失败，回到 OPEN", self.name,
+                )
+            elif self._failure_count >= self._failure_threshold:
                 self._state = self.OPEN
                 _logger.error(
                     "熔断器 [{}] 触发 | failures={}/{}",

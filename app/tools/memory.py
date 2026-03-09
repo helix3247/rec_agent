@@ -10,10 +10,10 @@ Milvus 集合: user_memory（独立于知识库 collection）
 """
 
 import json
+import threading
 import time
 from typing import Optional
 
-from openai import OpenAI
 from pymilvus import (
     Collection,
     CollectionSchema,
@@ -24,6 +24,7 @@ from pymilvus import (
 )
 
 from app.core.config import settings
+from app.core.embedding import get_embedding
 from app.core.llm import get_llm
 from app.core.logger import get_logger
 
@@ -37,6 +38,7 @@ _MEMORY_COLLECTION = "user_memory"
 _MEMORY_VECTOR_DIM = 3072
 _MAX_SUMMARY_LEN = 800
 _milvus_connected = False
+_milvus_connection_lock = threading.Lock()
 
 _SUMMARY_PROMPT = """你是一个对话摘要助手。请将以下用户与AI助手的对话精炼为一段简洁的摘要，
 重点保留用户的偏好、需求、购物意向和反馈信息。摘要应便于在未来的对话中回忆用户的个人偏好。
@@ -54,9 +56,13 @@ _SUMMARY_PROMPT = """你是一个对话摘要助手。请将以下用户与AI助
 
 
 def _ensure_milvus_connection():
-    """确保 Milvus 连接已建立。"""
+    """确保 Milvus 连接已建立（线程安全）。"""
     global _milvus_connected
-    if not _milvus_connected:
+    if _milvus_connected:
+        return
+    with _milvus_connection_lock:
+        if _milvus_connected:
+            return
         milvus_cfg = settings.milvus
         connections.connect(
             alias="default",
@@ -98,17 +104,8 @@ def _ensure_memory_collection() -> Collection:
 
 
 def _get_embedding(text: str) -> list[float]:
-    """调用 Embedding 模型获取向量表示。"""
-    emb_cfg = settings.embedding
-    client = OpenAI(
-        api_key=emb_cfg.embedding_api_key or "dummy",
-        base_url=emb_cfg.embedding_base_url,
-    )
-    response = client.embeddings.create(
-        model=emb_cfg.embedding_model,
-        input=[text],
-    )
-    return response.data[0].embedding
+    """调用 Embedding 模型获取向量表示（委托给统一的 embedding 模块）。"""
+    return get_embedding(text)
 
 
 def _summarize_conversation(messages: list[BaseMessage]) -> str:

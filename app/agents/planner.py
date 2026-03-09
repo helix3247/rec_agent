@@ -18,7 +18,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm, invoke_with_smart_routing_sync, get_model_router
+from app.core.llm import get_llm, invoke_with_smart_routing, get_model_router
 from app.core.logger import get_logger
 from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
 from app.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_INTEGRATE_PROMPT
@@ -53,7 +53,7 @@ def _should_clarify_step(result: dict) -> bool:
     )
 
 
-def _generate_plan(query: str, slots: dict, log) -> dict:
+async def _generate_plan(query: str, slots: dict, log) -> dict:
     """调用 LLM 生成任务计划。"""
     system_prompt = PLANNER_SYSTEM_PROMPT.format(
         query=query,
@@ -61,7 +61,7 @@ def _generate_plan(query: str, slots: dict, log) -> dict:
     )
 
     try:
-        plan_text = invoke_with_smart_routing_sync(
+        plan_text = await invoke_with_smart_routing(
             [SystemMessage(content=system_prompt)],
             agent_name="PlannerAgent",
             temperature=0.3,
@@ -74,7 +74,7 @@ def _generate_plan(query: str, slots: dict, log) -> dict:
         return {"plan_summary": "规划失败", "steps": []}
 
 
-def _integrate_results(
+async def _integrate_results(
     query: str,
     plan_summary: str,
     plan_results: list[dict[str, Any]],
@@ -100,7 +100,7 @@ def _integrate_results(
     )
 
     try:
-        return invoke_with_smart_routing_sync(
+        return await invoke_with_smart_routing(
             [SystemMessage(content=prompt)],
             agent_name="PlannerAgent",
             temperature=0.5,
@@ -113,7 +113,7 @@ def _integrate_results(
         return "\n".join(lines)
 
 
-def planner_node(state: AgentState) -> dict:
+async def planner_node(state: AgentState) -> dict:
     """
     PlannerNode 主节点。
 
@@ -140,7 +140,7 @@ def planner_node(state: AgentState) -> dict:
     # ── 模式 A: 首次进入，生成计划 ──
     if not plan_steps:
         log.info("任务规划开始 | query={}", query)
-        plan = _generate_plan(query, slots, log)
+        plan = await _generate_plan(query, slots, log)
 
         steps = plan.get("steps", [])[:MAX_PLAN_STEPS]
         if not steps:
@@ -224,7 +224,7 @@ def planner_node(state: AgentState) -> dict:
 
         plan_summary = state.get("response", "") or "综合购物方案"
         # 从 plan_steps 的首次规划中找到 plan_summary（存在 response 中）
-        integrated = _integrate_results(query, plan_summary, plan_results, log)
+        integrated = await _integrate_results(query, plan_summary, plan_results, log)
 
         all_candidates = []
         for r in plan_results:

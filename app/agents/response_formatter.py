@@ -8,13 +8,13 @@ import re
 from langchain_core.messages import SystemMessage
 
 from app.state import AgentState
-from app.core.llm import get_llm, get_model_router
+from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
-from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage, merge_token_usage
+from app.core.metrics import start_node_timer, record_node_metrics, merge_token_usage
 from app.prompts.response_formatter import FORMATTER_SYSTEM_PROMPT, SUGGESTED_QUESTIONS_PROMPT
 
 
-def response_formatter_node(state: AgentState) -> dict:
+async def response_formatter_node(state: AgentState) -> dict:
     """响应格式化节点：润色回答 + 生成推荐问题。"""
     t0 = start_node_timer()
     trace_id = state.get("trace_id", "-")
@@ -31,10 +31,10 @@ def response_formatter_node(state: AgentState) -> dict:
     total_token_usage: dict[str, int] = {}
 
     if response and task_status != "clarifying":
-        formatted_response, polish_usage = _polish_response(response, intent, candidates, log)
+        formatted_response, polish_usage = await _polish_response(response, intent, candidates, log)
         total_token_usage = merge_token_usage(total_token_usage, polish_usage)
 
-    suggested_questions, sq_usage = _generate_suggested_questions(
+    suggested_questions, sq_usage = await _generate_suggested_questions(
         intent=intent,
         messages=messages,
         response=formatted_response,
@@ -56,7 +56,7 @@ def response_formatter_node(state: AgentState) -> dict:
     return {**node_result, **metrics}
 
 
-def _polish_response(
+async def _polish_response(
     raw_response: str,
     intent: str,
     candidates: list[dict],
@@ -69,28 +69,23 @@ def _polish_response(
         candidates_count=len(candidates),
     )
 
-    router = get_model_router()
-    complexity = router.classify_complexity(agent_name="ResponseFormatter")
-    preferred = router.select_model(complexity)
-    log.info("智能路由 | complexity={} | model={}", complexity.value, preferred)
-
     try:
-        llm = get_llm(preferred, temperature=0.3)
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            SystemMessage(content=f"请润色以下回答：\n\n{raw_response}"),
-        ])
-        polished = response.content.strip()
-        usage = extract_token_usage(response)
-        if polished and len(polished) > 10:
-            return polished, usage
+        polished, usage = await invoke_llm_with_routing(
+            [
+                SystemMessage(content=system_prompt),
+                SystemMessage(content=f"请润色以下回答：\n\n{raw_response}"),
+            ],
+            agent_name="ResponseFormatter", log=log, temperature=0.3,
+        )
+        if polished and len(polished.strip()) > 10:
+            return polished.strip(), usage
     except Exception as e:
         log.warning("响应润色 LLM 调用失败，使用原始回答 | error={}", str(e))
 
     return raw_response, {}
 
 
-def _generate_suggested_questions(
+async def _generate_suggested_questions(
     intent: str,
     messages: list,
     response: str,
@@ -118,15 +113,12 @@ def _generate_suggested_questions(
         candidates_summary=candidates_summary,
     )
 
-    router = get_model_router()
-    complexity = router.classify_complexity(agent_name="ResponseFormatter")
-    preferred = router.select_model(complexity)
-
     try:
-        llm = get_llm(preferred, temperature=0.7)
-        result = llm.invoke([SystemMessage(content=system_prompt)])
-        usage = extract_token_usage(result)
-        questions = _parse_questions(result.content)
+        content, usage = await invoke_llm_with_routing(
+            [SystemMessage(content=system_prompt)],
+            agent_name="ResponseFormatter", log=log, temperature=0.7,
+        )
+        questions = _parse_questions(content)
         if questions:
             return questions[:5], usage
     except Exception as e:

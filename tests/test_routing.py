@@ -1,17 +1,55 @@
 """
 tests/test_routing.py
 验证不同意图输入通过 Dispatcher 的路由路径是否正确。
-使用真实 LLM 识别意图，利用 dispatch_route 函数直接验证路由目标。
+
+分两层测试:
+1. 纯单元测试：直接验证 dispatch_route 函数的路由逻辑（无 LLM 依赖）。
+2. 端到端集成测试：使用真实 LLM 识别意图后验证完整路由路径（需要外部服务）。
 """
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+import pytest
 from langchain_core.messages import HumanMessage
-from app.graph import app_graph
+
 from app.agents.dispatcher import dispatch_route
+
+
+# ─────────────── 单元测试：dispatch_route 路由逻辑 ───────────────
+
+@pytest.mark.parametrize("intent,slots,expected_route", [
+    ("search", {"category": "相机", "budget": "5000"}, "shopping"),
+    ("search", {"category": "相机"}, "dialog"),
+    ("search", {}, "dialog"),
+    ("outfit", {"scenario": "通勤"}, "outfit"),
+    ("outfit", {}, "dialog"),
+    ("qa", {}, "rag"),
+    ("compare", {}, "shopping"),
+    ("plan", {}, "planner"),
+    ("chat", {}, "dialog"),
+    ("tool", {}, "tool_call"),
+    ("unknown", {}, "dialog"),
+])
+def test_dispatch_route(intent, slots, expected_route):
+    state = {"user_intent": intent, "slots": slots}
+    assert dispatch_route(state) == expected_route
+
+
+def test_search_with_all_slots_routes_to_shopping():
+    state = {
+        "user_intent": "search",
+        "slots": {"category": "手机", "budget": "3000以内"},
+    }
+    assert dispatch_route(state) == "shopping"
+
+
+def test_search_missing_budget_routes_to_dialog():
+    state = {
+        "user_intent": "search",
+        "slots": {"category": "手机"},
+    }
+    assert dispatch_route(state) == "dialog"
+
+
+# ─────────────── 端到端集成测试（需要 LLM 等外部服务） ───────────────
 
 
 ROUTE_CASES = [
@@ -53,51 +91,28 @@ ROUTE_CASES = [
 ]
 
 
-def main():
-    print("=" * 60)
-    print("  Dispatcher 路由正确性测试")
-    print("=" * 60)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ROUTE_CASES, ids=[c["query"][:20] for c in ROUTE_CASES])
+async def test_e2e_routing(case):
+    """端到端路由验证：通过真实 LLM 意图识别后检查路由目标。"""
+    from app.graph import app_graph
 
-    passed = 0
+    result = await app_graph.ainvoke({
+        "messages": [HumanMessage(content=case["query"])],
+        "trace_id": "test-route",
+        "thread_id": "test-thread-route",
+        "user_id": "user-test",
+    })
 
-    for i, case in enumerate(ROUTE_CASES, 1):
-        query = case["query"]
-        expected_intent = case["expected_intent"]
-        expected_route = case["expected_route"]
+    actual_intent = result.get("user_intent", "")
+    actual_route = dispatch_route({
+        "user_intent": actual_intent,
+        "slots": result.get("slots", {}),
+    })
 
-        result = app_graph.invoke({
-            "messages": [HumanMessage(content=query)],
-            "trace_id": f"test-route-{i:03d}",
-            "thread_id": f"test-thread-route-{i}",
-            "user_id": "user-test",
-        })
-
-        actual_intent = result.get("user_intent", "")
-        actual_route = dispatch_route({
-            "user_intent": actual_intent,
-            "slots": result.get("slots", {}),
-        })
-
-        intent_ok = actual_intent == expected_intent
-        route_ok = actual_route == expected_route
-
-        if intent_ok and route_ok:
-            passed += 1
-            status = "[OK]"
-        else:
-            status = "[FAIL]"
-
-        print(f"  {status} Case {i} | query=\"{query}\"")
-        print(f"         intent: expected={expected_intent}, actual={actual_intent} {'OK' if intent_ok else 'MISMATCH'}")
-        print(f"         route:  expected={expected_route}, actual={actual_route} {'OK' if route_ok else 'MISMATCH'}")
-
-    print(f"\n  结果: {passed}/{len(ROUTE_CASES)} 通过")
-    if passed == len(ROUTE_CASES):
-        print("  [OK] 全部路由测试通过!")
-    else:
-        print("  [WARN] 部分路由不符合预期")
-    print("=" * 60)
-
-
-if __name__ == "__main__":
-    main()
+    assert actual_intent == case["expected_intent"], (
+        f"Intent mismatch: expected={case['expected_intent']}, got={actual_intent}"
+    )
+    assert actual_route == case["expected_route"], (
+        f"Route mismatch: expected={case['expected_route']}, got={actual_route}"
+    )

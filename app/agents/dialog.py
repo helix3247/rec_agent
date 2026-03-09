@@ -21,9 +21,9 @@ from langchain_core.messages import (
 
 from app.state import AgentState
 from app.core.config import settings
-from app.core.llm import get_llm, get_model_router
+from app.core.agent_routing import invoke_llm_with_routing
 from app.core.logger import get_logger
-from app.core.metrics import start_node_timer, record_node_metrics, extract_token_usage
+from app.core.metrics import start_node_timer, record_node_metrics
 from app.prompts.dialog import CLARIFY_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT
 from app.tools.memory import (
     migrate_to_long_term,
@@ -192,7 +192,7 @@ def _find_missing_slots(intent: str, slots: dict) -> list[str]:
     return [s for s in required if not slots.get(s)]
 
 
-def dialog_node(state: AgentState) -> dict:
+async def dialog_node(state: AgentState) -> dict:
     """
     DialogFlowAgent 主节点。
     - 如果来自 Dispatcher 的澄清请求（intent 为 search/outfit 但缺槽位），生成追问。
@@ -218,11 +218,11 @@ def dialog_node(state: AgentState) -> dict:
 
     if missing and intent in ("search", "outfit"):
         log.info("槽位缺失，生成追问 | missing={}", missing)
-        reply, token_usage = _generate_clarification(intent, merged_slots, missing, messages, log)
+        reply, token_usage = await _generate_clarification(intent, merged_slots, missing, messages, log)
         task_status = "clarifying"
     else:
         log.info("进入闲聊/通用对话模式")
-        reply, token_usage = _generate_chat_reply(messages, log)
+        reply, token_usage = await _generate_chat_reply(messages, log)
         task_status = "completed"
 
     # 将包含本轮回复的完整对话保存到 Redis
@@ -247,7 +247,7 @@ def dialog_node(state: AgentState) -> dict:
     return {**node_result, **metrics}
 
 
-def _generate_clarification(
+async def _generate_clarification(
     intent: str,
     slots: dict,
     missing: list[str],
@@ -271,42 +271,21 @@ def _generate_clarification(
         missing_slots=missing_str,
     )
 
-    router = get_model_router()
-    complexity = router.classify_complexity(agent_name="DialogFlow")
-    preferred = router.select_model(complexity)
-    fallback_type = "fallback" if preferred == "primary" else "primary"
-    log.info("智能路由 | complexity={} | model={}", complexity.value, preferred)
-
     try:
-        llm = get_llm(preferred)
-        response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
-        return response.content, extract_token_usage(response)
-    except Exception as e:
-        log.warning("首选模型调用失败，降级使用 {} | error={}", fallback_type, str(e))
-        try:
-            llm = get_llm(fallback_type)
-            response = llm.invoke([SystemMessage(content=system_prompt)] + messages)
-            return response.content, extract_token_usage(response)
-        except Exception:
-            return "请问您能补充一下更多信息吗？比如预算范围、使用场景等，这样我能更好地为您推荐。", {}
+        return await invoke_llm_with_routing(
+            [SystemMessage(content=system_prompt)] + messages,
+            agent_name="DialogFlow", log=log,
+        )
+    except Exception:
+        return "请问您能补充一下更多信息吗？比如预算范围、使用场景等，这样我能更好地为您推荐。", {}
 
 
-def _generate_chat_reply(messages: list[BaseMessage], log) -> tuple[str, dict[str, int]]:
+async def _generate_chat_reply(messages: list[BaseMessage], log) -> tuple[str, dict[str, int]]:
     """调用 LLM 生成闲聊回复。返回 (回复文本, token_usage)。"""
-    router = get_model_router()
-    complexity = router.classify_complexity(agent_name="DialogFlow")
-    preferred = router.select_model(complexity)
-    fallback_type = "fallback" if preferred == "primary" else "primary"
-
     try:
-        llm = get_llm(preferred)
-        response = llm.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages)
-        return response.content, extract_token_usage(response)
-    except Exception as e:
-        log.warning("首选模型调用失败，降级使用 {} | error={}", fallback_type, str(e))
-        try:
-            llm = get_llm(fallback_type)
-            response = llm.invoke([SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages)
-            return response.content, extract_token_usage(response)
-        except Exception:
-            return "你好！有什么可以帮您的吗？如果您有购物需求，可以直接告诉我。", {}
+        return await invoke_llm_with_routing(
+            [SystemMessage(content=CHAT_SYSTEM_PROMPT)] + messages,
+            agent_name="DialogFlow", log=log,
+        )
+    except Exception:
+        return "你好！有什么可以帮您的吗？如果您有购物需求，可以直接告诉我。", {}
